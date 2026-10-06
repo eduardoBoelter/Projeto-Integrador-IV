@@ -1,0 +1,7 @@
+# Binários de compilação
+*.o
+*.exe
+simulador
+
+# Arquivo gerado pelo simulador
+*.bin
