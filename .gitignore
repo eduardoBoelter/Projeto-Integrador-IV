@@ -5,3 +5,7 @@ simulador
 
 # Arquivo gerado pelo simulador
 *.bin
+
+# Executáveis dos testes
+tests/*
+!tests/*.cpp
