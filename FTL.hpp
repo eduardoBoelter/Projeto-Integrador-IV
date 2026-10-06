@@ -163,6 +163,207 @@ public:
     }
 };
 
+// ---------------------------------------------------------------------------
+// Etapa 5: FTL com mapeamento de páginas (LBA -> PBA) e garbage collection.
+//
+// Escrita fora do lugar (out-of-place): toda gravação vai para a próxima
+// página livre do "bloco ativo"; a página antiga do LBA vira inválida e a
+// tabela de mapeamento passa a apontar para a nova. Nenhuma escrita apaga
+// nada diretamente.
+//
+// Quando sobram poucos blocos livres, o garbage collection escolhe uma
+// vítima, copia as páginas válidas dela para o bloco ativo e a apaga,
+// devolvendo-a à lista de blocos livres.
+//
+// Nesta etapa o bloco livre escolhido é sempre o de MENOR NÚMERO (política
+// ingênua, sem nivelamento). A Etapa 6 troca só essa escolha, em
+// select_free_block(), pelo bloco de menor contador P/E (wear leveling).
+// ---------------------------------------------------------------------------
+
+// Contadores próprios do garbage collection
+struct GCStats {
+    uint64_t runs = 0;          // quantas vezes o GC apagou uma vítima
+    uint64_t pages_copied = 0;  // páginas válidas copiadas pelo GC
+};
+
+class PageMappingFTL : public FTL {
+public:
+    // Abaixo deste número de blocos livres, o GC é acionado antes de abrir um novo bloco ativo
+    static constexpr size_t GC_MIN_FREE_BLOCKS = 2;
+
+private:
+    static constexpr uint32_t NO_BLOCK = 0xFFFFFFFF;
+
+    std::vector<PhysicalAddress> l2p;   // tabela de mapeamento: LBA -> PBA
+    std::vector<bool> mapped;           // o LBA já foi gravado?
+    std::vector<bool> is_free;          // bloco totalmente livre, disponível para uso
+    size_t free_count = 0;
+    uint32_t active_block = NO_BLOCK;   // bloco que está recebendo as escritas
+    uint32_t next_page = 0;             // próxima página livre do bloco ativo
+    GCStats gc_stats;
+
+    // Reconstrói a tabela de mapeamento a partir dos metadados das páginas
+    // (estado e LBA), que a camada física guarda em nand_meta.bin. Assim, a
+    // FTL funciona tanto num dispositivo novo quanto num já usado.
+    void rebuild() {
+        l2p.assign(LOGICAL_PAGES, PhysicalAddress{0, 0});
+        mapped.assign(LOGICAL_PAGES, false);
+        is_free.assign(TOTAL_BLOCKS, false);
+        free_count = 0;
+
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
+            const NANDBlock& block = driver.block_info(b);
+            if (block.is_bad_block) continue;
+            if (block.free_pages_count == PAGES_PER_BLOCK) {
+                is_free[b] = true;
+                free_count++;
+                continue;
+            }
+            uint32_t last_used = 0;
+            for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
+                const Page& page = block.pages[p];
+                if (page.state != PageState::FREE) last_used = p;
+                if (page.state == PageState::VALID && page.logical_address < LOGICAL_PAGES) {
+                    l2p[page.logical_address] = {b, p};
+                    mapped[page.logical_address] = true;
+                }
+            }
+            // Bloco parcialmente gravado (só páginas livres no final): volta a ser
+            // o bloco ativo, para não desperdiçar as páginas que sobraram nele.
+            if (active_block == NO_BLOCK && last_used + 1 < PAGES_PER_BLOCK &&
+                block.free_pages_count == PAGES_PER_BLOCK - (last_used + 1)) {
+                active_block = b;
+                next_page = last_used + 1;
+            }
+        }
+    }
+
+    // Retira um bloco da lista de livres e o torna o bloco ativo
+    bool open_new_active_block() {
+        if (free_count == 0) return false;
+        uint32_t chosen = select_free_block();
+        is_free[chosen] = false;
+        free_count--;
+        active_block = chosen;
+        next_page = 0;
+        return true;
+    }
+
+    // Grava os dados na próxima página livre do bloco ativo e atualiza o
+    // mapeamento. allow_gc = false quando quem chama é o próprio GC.
+    FTLResult append(uint32_t lba, const uint8_t* data, bool allow_gc) {
+        if (active_block == NO_BLOCK || next_page >= PAGES_PER_BLOCK) {
+            if (allow_gc) {
+                // Libera espaço antes de consumir mais um bloco livre
+                while (free_count < GC_MIN_FREE_BLOCKS && collect_garbage()) {}
+            }
+            if (!open_new_active_block()) return FTLResult::DEVICE_WORN_OUT;
+        }
+
+        PhysicalAddress target{active_block, next_page++};
+        IOResult programmed = driver.program_page(target, data, lba);
+        if (programmed != IOResult::OK) return FTLResult::IO_ERROR;
+
+        // A versão anterior do LBA vira inválida (o dado antigo fica no bloco até o GC)
+        if (mapped[lba]) driver.invalidate_page(l2p[lba]);
+        l2p[lba] = target;
+        mapped[lba] = true;
+        return FTLResult::OK;
+    }
+
+    // Escolha da vítima: política gulosa (greedy), o bloco com mais páginas
+    // inválidas, pois é o que libera mais espaço copiando menos.
+    uint32_t select_victim() const {
+        uint32_t victim = NO_BLOCK;
+        size_t most_invalid = 0;
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
+            if (is_free[b] || b == active_block) continue;
+            const NANDBlock& block = driver.block_info(b);
+            if (block.is_bad_block) continue;
+            if (block.invalid_pages_count > most_invalid) {
+                most_invalid = block.invalid_pages_count;
+                victim = b;
+            }
+        }
+        return victim;
+    }
+
+    // Uma rodada de garbage collection. Retorna false se não há o que coletar.
+    bool collect_garbage() {
+        uint32_t victim = select_victim();
+        if (victim == NO_BLOCK) return false;
+
+        // 1. Copia as páginas ainda válidas da vítima para o bloco ativo
+        std::vector<uint8_t> buffer(PAGE_SIZE);
+        for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
+            const Page& page = driver.block_info(victim).pages[p];
+            if (page.state != PageState::VALID) continue;
+            uint32_t lba = page.logical_address;
+            // Cópia antiga que a tabela não aponta mais (por exemplo, num dispositivo
+            // usado antes por outro modo): não é copiada, será apagada com a vítima.
+            if (lba >= LOGICAL_PAGES || !mapped[lba] || l2p[lba].block != victim || l2p[lba].page != p)
+                continue;
+            if (driver.read_page({victim, p}, buffer.data()) != IOResult::OK) return false;
+            if (append(lba, buffer.data(), false) != FTLResult::OK) return false;
+            gc_stats.pages_copied++;
+        }
+
+        // 2. Apaga a vítima. Se ela morrer neste apagamento, os dados já
+        //    estão a salvo em outro bloco: só a capacidade diminui.
+        EraseResult erased = driver.erase_block(victim);
+        note_erase(erased, victim);
+        gc_stats.runs++;
+        if (erased == EraseResult::OK) {
+            is_free[victim] = true;
+            free_count++;
+        }
+        return erased == EraseResult::OK || erased == EraseResult::WORN_OUT;
+    }
+
+protected:
+    // Política de alocação: o bloco livre de MENOR NÚMERO (sem nivelamento).
+    // É o ponto que a Etapa 6 vai sobrescrever com o wear leveling dinâmico.
+    virtual uint32_t select_free_block() const {
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
+            if (is_free[b]) return b;
+        }
+        return NO_BLOCK;
+    }
+
+    bool block_is_free(uint32_t block_id) const { return is_free[block_id]; }
+
+public:
+    explicit PageMappingFTL(IODriver& io) : FTL(io) { rebuild(); }
+
+    const char* name() const override { return "Mapeamento de paginas sem wear leveling"; }
+
+    FTLResult write(uint32_t lba, const uint8_t* data) override {
+        if (lba >= LOGICAL_PAGES) return FTLResult::OUT_OF_RANGE;
+        ftl_stats.host_writes++;
+        return append(lba, data, true);
+    }
+
+    FTLResult read(uint32_t lba, uint8_t* buffer) override {
+        if (lba >= LOGICAL_PAGES) return FTLResult::OUT_OF_RANGE;
+        ftl_stats.host_reads++;
+        if (!mapped[lba]) {
+            std::memset(buffer, ERASED_BYTE, PAGE_SIZE);
+            return FTLResult::OK;
+        }
+        return driver.read_page(l2p[lba], buffer) == IOResult::OK ? FTLResult::OK : FTLResult::IO_ERROR;
+    }
+
+    // Consultas usadas pelos testes e pela demonstração
+    bool lookup(uint32_t lba, PhysicalAddress& pba) const {
+        if (lba >= LOGICAL_PAGES || !mapped[lba]) return false;
+        pba = l2p[lba];
+        return true;
+    }
+    size_t free_blocks() const { return free_count; }
+    uint32_t current_block() const { return active_block; }
+    const GCStats& gc() const { return gc_stats; }
+};
+
 inline const char* to_string(FTLResult result) {
     switch (result) {
         case FTLResult::OK:              return "OK";

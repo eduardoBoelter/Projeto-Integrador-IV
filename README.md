@@ -17,11 +17,14 @@ No Windows (MinGW), use `mingw32-make` ou compile diretamente:
 ## Execução
 
 `./simulador` abre o dispositivo existente (`nand_device.bin` com os dados e
-`nand_meta.bin` com o desgaste) ou formata um novo, se não houver.
+`nand_meta.bin` com o desgaste), ou formata um novo se não houver, e demonstra a FTL com
+mapeamento de páginas: cada alteração de um LBA vai para uma página nova.
 `./simulador --format` força a formatação e zera o desgaste.
-`./simulador --cenario-quente` roda o cenário de dados quentes no mapeamento direto
-até a primeira falha de bloco e exporta o desgaste por bloco em `desgaste_direto.csv`
-(usa arquivos próprios e não altera o dispositivo acima).
+
+`./simulador --cenario-quente` roda o cenário de dados quentes (90% das escritas nos
+metadados) até a primeira falha de bloco no mapeamento direto e no mapeamento de páginas,
+mostra a tabela comparativa e exporta o desgaste por bloco em `desgaste_direto.csv` e
+`desgaste_mapeamento.csv`. Usa arquivos próprios e não altera o dispositivo acima.
 
 ## Documentação
 
