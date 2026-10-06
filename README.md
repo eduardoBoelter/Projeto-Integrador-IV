@@ -12,3 +12,9 @@ make clean  # remove binários e o nand_device.bin
 
 No Windows (MinGW), use `mingw32-make` ou compile diretamente:
 `g++ -std=c++17 -Wall -Wextra main.cpp -o simulador.exe`.
+
+## Documentação
+
+- [Requisitos](docs/01-requisitos.md)
+- [Arquitetura](docs/02-arquitetura.md)
+- [Anotações para o artigo](docs/anotacoes-artigo.md)
