@@ -67,9 +67,55 @@ funcionamento das partes implementadas; dificuldades e soluções; figuras com l
 - Com chips reais (dezenas de milhares de ciclos), simular até a falha levaria muito tempo.
   *Solução:* limite de 1000 ciclos, configurável por constante.
 
-## Etapa 2: Camada física da NAND
+## Etapa 2: Camada física da NAND (concluída)
 
-*(a preencher ao concluir a etapa)*
+**O que foi feito**
+- Classe `NANDFlashMemory` (`NANDFlash.hpp`) simula o chip: 128 blocos × 64 páginas × 2 KB = 16 MB,
+  guardados no arquivo `nand_device.bin`, criado com todos os bytes em `0xFF` (estado apagado da Flash).
+- Cada bloco tem contador de ciclos P/E e marca de bad block; cada página tem estado (livre, válida ou inválida) e LBA.
+- `erase_block()` grava `0xFF` no trecho do bloco dentro do arquivo, incrementa o contador P/E e, no ciclo 1000,
+  marca o bloco como bad block. O retorno diferencia os casos: `OK`, `WORN_OUT` (morreu agora),
+  `BAD_BLOCK` (já estava morto, nada foi feito) e `IO_ERROR`.
+- **Persistência do desgaste:** os metadados são gravados em `nand_meta.bin` (`save_metadata()`) e recarregados
+  ao abrir o dispositivo (`open()`). Antes, o desgaste se perdia ao fechar o programa.
+- `format()` devolve o dispositivo ao estado de fábrica (dados em 0xFF e contadores zerados).
+- Programa de teste da camada (`tests/test_nand.cpp`, executado com `make test`): 25 verificações, todas passando.
+
+**Funcionamento (para descrever no texto)**
+- Endereço de uma página no arquivo: `(bloco × 64 + página) × 2048` bytes.
+- Formato do `nand_meta.bin` (41.628 bytes): cabeçalho com assinatura `NANDMETA`, versão e geometria
+  (tamanho de página, páginas por bloco, número de blocos e limite P/E), seguido, para cada bloco, do contador P/E
+  (4 bytes), da marca de bad block (1 byte) e, para cada página, do estado (1 byte) e do LBA (4 bytes).
+- Ao abrir, o simulador confere a assinatura, a versão, a geometria e o tamanho do arquivo de dados.
+  Se algo não bate, o carregamento é recusado sem alterar o estado em memória.
+
+**Decisões técnicas**
+1. **Dados e metadados em arquivos separados.** O `nand_device.bin` representa só o conteúdo das células;
+   os metadados são informação de controle, que num chip real fica na área reservada (*spare area*) de cada página.
+   Separar facilita inspecionar os dois e manter o arquivo de dados com o tamanho exato do dispositivo.
+2. **Salvamento explícito dos metadados**, como um *flush*, e não a cada apagamento. Gravar 41 KB a cada operação
+   multiplicaria o tempo das simulações longas (dezenas de milhares de apagamentos).
+3. **Inteiros gravados em little-endian byte a byte**, para o mesmo `nand_meta.bin` funcionar no Windows e no Linux.
+4. **Geometria gravada no cabeçalho**, para impedir que um arquivo criado com outros parâmetros seja carregado por engano.
+5. **Contadores de páginas (válidas, inválidas e livres) não são gravados**: são recalculados a partir dos estados,
+   evitando inconsistência entre os dois.
+6. **Testes automatizados próprios, sem biblioteca externa** (macro `CHECK`), seguindo o requisito de usar só a biblioteca padrão.
+
+**Figuras e evidências sugeridas**
+- *Tela: saída do `make test`* com as 25 verificações passando. Explicar que o teste cobre formatação, apagamento,
+  fim de vida do bloco, persistência e arquivos inválidos.
+- *Tela: o simulador executado duas vezes seguidas*, com o contador P/E do bloco 0 indo de 1 para 2.
+  Mostra que o desgaste sobrevive entre execuções.
+- *Trecho de código: `erase_block()` e `reset_after_erase()`*, mostrando o incremento do P/E e a marcação de bad block.
+- *Figura: layout dos arquivos*: `nand_device.bin` dividido em blocos e páginas, e a estrutura do `nand_meta.bin`.
+
+**Dificuldades e soluções**
+- Na primeira versão, cada página guardava uma cópia de 2 KB dos dados em memória, duplicando o arquivo binário.
+  *Solução:* a memória passou a guardar só os metadados; o conteúdo fica apenas no arquivo.
+- O apagamento retornava `false` tanto quando o bloco morria naquele ciclo quanto quando já estava morto.
+  *Solução:* o enum `EraseResult`, que diferencia os casos.
+- O desgaste se perdia a cada execução, o que impediria simulações em várias sessões.
+  *Solução:* o arquivo `nand_meta.bin` com validação de formato e geometria.
 
 ## Etapa 3: Driver de E/S
 
