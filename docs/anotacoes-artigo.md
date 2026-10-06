@@ -117,9 +117,60 @@ funcionamento das partes implementadas; dificuldades e soluções; figuras com l
 - O desgaste se perdia a cada execução, o que impediria simulações em várias sessões.
   *Solução:* o arquivo `nand_meta.bin` com validação de formato e geometria.
 
-## Etapa 3: Driver de E/S
+## Etapa 3: Driver de E/S (concluída)
 
-*(a preencher)*
+**O que foi feito**
+- Classe `IODriver` (`IODriver.hpp`): a única porta de acesso da FTL à memória. Oferece
+  `read_page()`, `program_page()`, `invalidate_page()` e `erase_block()`, todas endereçadas por
+  `PhysicalAddress {bloco, página}` (o PBA).
+- A camada física ganhou as operações "cruas" `read_page_data()` e `write_page_data()`, que só movem os 2 KB
+  de/para o arquivo. As regras da Flash ficam no driver.
+- Contadores de operações (`IOStats`): leituras, programações, invalidações, apagamentos e operações recusadas.
+  Vão servir de base para a métrica de amplificação de escrita.
+- Programa de teste do driver (`tests/test_driver.cpp`): 27 verificações. Com as 25 da camada física,
+  o `make test` passa a ter 52 verificações, todas passando.
+
+**Funcionamento (para descrever no texto)**
+- **Regras aplicadas pelo driver**, que reproduzem as restrições físicas descritas no referencial teórico:
+  1. leitura e programação são feitas por página (2 KB);
+  2. uma página só pode ser programada se estiver **livre**: regravar uma página válida ou inválida é recusado
+     com `NOT_FREE` (não existe escrita no lugar, *in-place write*);
+  3. o apagamento é feito por **bloco inteiro** e é a única forma de devolver as páginas ao estado livre;
+  4. bad blocks não aceitam programação nem apagamento (`BAD_BLOCK`);
+  5. endereços inexistentes são recusados (`OUT_OF_RANGE`).
+- `program_page()` grava os dados e marca a página como **válida**, guardando o LBA que ela contém.
+- `invalidate_page()` marca a página como **inválida** sem tocar no arquivo: assim como na Flash real,
+  o dado antigo continua lá até o bloco ser apagado. É o que a FTL fará quando um LBA for atualizado em outro lugar.
+- Cada operação atualiza os contadores de páginas livres, válidas e inválidas do bloco. O garbage collection
+  (Etapa 5) vai usar o contador de inválidas para escolher qual bloco apagar.
+- Ciclo de vida de uma página: **livre → (program_page) → válida → (invalidate_page) → inválida → (erase_block) → livre**
+  (diagrama de estados na seção 7 da arquitetura).
+
+**Decisões técnicas**
+1. **Separar "física" e "driver".** A camada física só sabe mover bytes e contar desgaste; o driver impõe as regras.
+   Assim, cada camada é testada isoladamente e a FTL nunca acessa o arquivo diretamente.
+2. **Arquivo de dados mantido aberto** durante toda a execução (antes era reaberto a cada apagamento).
+   As simulações vão fazer centenas de milhares de operações de página, e reabrir o arquivo em cada uma seria lento.
+   Cada escrita é seguida de `flush()`, para o conteúdo no disco estar sempre atualizado.
+3. **Retornos com enum (`IOResult`)** em vez de `bool`, para o chamador saber *por que* a operação falhou.
+4. **Leitura de página livre é permitida** e retorna `0xFF`, como na Flash real.
+5. **Simplificação:** a Flash real exige que as páginas de um bloco sejam programadas em ordem (0, 1, 2...).
+   O driver não impõe essa regra; a FTL da Etapa 5 já vai gravar sempre em ordem.
+
+**Figuras e evidências sugeridas**
+- *Tela: execução do `./simulador`*, mostrando a gravação, a leitura de volta da mensagem, a tentativa de sobrescrita
+  recusada com `NOT_FREE` e a invalidação. Na segunda execução, aparece o apagamento do bloco antes de gravar de novo.
+  É uma boa figura para explicar a assimetria "escreve por página, apaga por bloco".
+- *Tela: saída do `make test`* com as verificações das duas camadas.
+- *Trecho de código: `program_page()`*, mostrando a verificação de página livre e a atualização dos contadores.
+- *Tabela: regras do driver e o código de retorno de cada uma* (lista acima).
+
+**Dificuldades e soluções**
+- Reabrir o arquivo a cada operação ficaria lento nas simulações. *Solução:* o arquivo fica aberto durante toda
+  a execução, com `flush()` após cada escrita.
+- Ao manter o arquivo aberto, uma tentativa de abrir um arquivo inválido não pode derrubar o dispositivo em uso.
+  *Solução:* `open()` só troca o arquivo depois que toda a validação passa.
+- O apagamento de um bloco inexistente lançava exceção. *Solução:* novo retorno `EraseResult::OUT_OF_RANGE`.
 
 ## Etapa 4: FTL com mapeamento direto
 
