@@ -19,6 +19,9 @@ No Windows (MinGW), use `mingw32-make` ou compile diretamente:
 `./simulador` abre o dispositivo existente (`nand_device.bin` com os dados e
 `nand_meta.bin` com o desgaste) ou formata um novo, se não houver.
 `./simulador --format` força a formatação e zera o desgaste.
+`./simulador --cenario-quente` roda o cenário de dados quentes no mapeamento direto
+até a primeira falha de bloco e exporta o desgaste por bloco em `desgaste_direto.csv`
+(usa arquivos próprios e não altera o dispositivo acima).
 
 ## Documentação
 

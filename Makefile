@@ -2,8 +2,8 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2
 
 TARGET  = simulador
-HEADERS = NANDFlash.hpp IODriver.hpp
-TESTS   = tests/test_nand tests/test_driver
+HEADERS = NANDFlash.hpp IODriver.hpp FTL.hpp
+TESTS   = tests/test_nand tests/test_driver tests/test_ftl_direct
 
 all: $(TARGET)
 
@@ -17,6 +17,7 @@ run: $(TARGET)
 test: $(TESTS)
 	./tests/test_nand
 	./tests/test_driver
+	./tests/test_ftl_direct
 
 tests/test_nand: tests/test_nand.cpp NANDFlash.hpp
 	$(CXX) $(CXXFLAGS) tests/test_nand.cpp -o tests/test_nand
@@ -24,7 +25,10 @@ tests/test_nand: tests/test_nand.cpp NANDFlash.hpp
 tests/test_driver: tests/test_driver.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) tests/test_driver.cpp -o tests/test_driver
 
+tests/test_ftl_direct: tests/test_ftl_direct.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) tests/test_ftl_direct.cpp -o tests/test_ftl_direct
+
 clean:
-	rm -f $(TARGET) $(TARGET).exe $(TESTS) tests/*.exe *.o *.bin
+	rm -f $(TARGET) $(TARGET).exe $(TESTS) tests/*.exe *.o *.bin *.csv
 
 .PHONY: all run test clean

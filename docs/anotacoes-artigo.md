@@ -172,9 +172,74 @@ funcionamento das partes implementadas; dificuldades e soluções; figuras com l
   *Solução:* `open()` só troca o arquivo depois que toda a validação passa.
 - O apagamento de um bloco inexistente lançava exceção. *Solução:* novo retorno `EraseResult::OUT_OF_RANGE`.
 
-## Etapa 4: FTL com mapeamento direto
+## Etapa 4: FTL com mapeamento direto (concluída)
 
-*(a preencher)*
+**O que foi feito**
+- Interface comum `FTL` (`FTL.hpp`), com `write(lba)` e `read(lba)`. É tudo o que o sistema de arquivos vai enxergar.
+  Os três modos da pesquisa vão implementar essa mesma interface.
+- Primeiro modo: `DirectFTL`, o **mapeamento direto (LBA = PBA)**, que é o cenário **sem nivelamento** da comparação.
+- Capacidade lógica fixada em 7680 LBAs (120 blocos × 64 páginas = 15 MB). Os 8 blocos restantes ficam reservados
+  (over-provisioning) e só serão usados pelos modos com mapeamento, mantendo a mesma capacidade visível nos três modos.
+- Métricas já registradas pela FTL: escritas lógicas, momento da primeira falha de bloco (número da escrita lógica e qual bloco)
+  e amplificação de escrita.
+- **Cenário de dados quentes** (`./simulador --cenario-quente`): primeira medição do problema da pesquisa,
+  com exportação do desgaste por bloco em CSV.
+- Programa de teste da FTL (`tests/test_ftl_direct.cpp`): 20 verificações. O `make test` passa a ter 72, todas passando.
+
+**Funcionamento (para descrever no texto)**
+- Tradução de endereço: `bloco = LBA / 64` e `página = LBA % 64`. O LBA 130, por exemplo, fica sempre no bloco 2, página 2.
+- Primeira gravação de um LBA: a página está livre e é programada diretamente, sem apagar nada.
+- Alteração de um LBA já gravado: como a Flash não permite sobrescrever, a FTL faz o ciclo **read-modify-erase-write**:
+  1. lê para a RAM todas as páginas válidas do bloco;
+  2. troca, na RAM, a página que mudou;
+  3. apaga o bloco inteiro (+1 ciclo P/E);
+  4. regrava todas as páginas.
+  Ou seja, alterar 2 KB custa o apagamento de um bloco de 128 KB e a regravação de até 64 páginas.
+- Quando o bloco chega a 1000 ciclos, ele vira bad block durante o apagamento. No mapeamento direto não existe outro lugar
+  para colocar os LBAs dele, então os dados do bloco são perdidos e a escrita retorna `DEVICE_WORN_OUT`.
+  Os LBAs dos outros blocos continuam funcionando.
+
+**Resultado do cenário de dados quentes** (semente fixa 2026, resultado reproduzível)
+- Fase 1: o disco inteiro é gravado uma vez (7680 escritas, como copiar arquivos para o pendrive).
+- Fase 2: 90% das escritas vão para os LBAs 0 a 3 (metadados: superbloco, tabela de alocação e diretório)
+  e 10% para LBAs aleatórios de dados.
+
+| Métrica | Valor |
+|---|---|
+| Primeira falha | escrita lógica nº **8812** (bloco 0), apenas **1132 escritas** depois do preenchimento |
+| Apagamentos por bloco | média **8,84**, desvio padrão **87,96**, máximo **1000** |
+| Blocos nunca apagados | **42 de 128** |
+| Amplificação de escrita na fase 2 | **63,94** (cada escrita lógica regravou, em média, 64 páginas) |
+| Blocos mais desgastados | bloco 0: 1000 ciclos; o segundo mais desgastado tem só **5** |
+
+Interpretação para o texto: o dispositivo falhou com **menos de 1% do desgaste total disponível usado**
+(1132 apagamentos de um total de 128 × 1000 = 128.000 possíveis). O bloco dos metadados morreu enquanto 42 blocos
+nunca foram apagados. É exatamente o problema descrito na introdução da proposta, agora medido no simulador.
+O desvio padrão alto (87,96 para uma média de 8,84) é o número que o wear leveling deverá reduzir.
+
+**Decisões técnicas**
+1. **Interface abstrata `FTL`** (classe com métodos virtuais): o sistema de arquivos e os cenários de teste recebem
+   uma `FTL&` e não sabem qual modo está rodando. Isso garante que a comparação use exatamente a mesma carga.
+2. **Mesma capacidade lógica nos três modos** (7680 LBAs), mesmo que o modo direto não use os blocos reservados.
+3. **Regravação só das páginas que estavam válidas**: páginas livres do bloco continuam livres após o read-modify-erase-write.
+4. **Leitura de LBA nunca gravado retorna 0xFF** (como um setor vazio), em vez de erro.
+5. **Desvio padrão calculado sobre os 128 blocos físicos**, inclusive os reservados, para comparar de forma justa
+   com os modos que usam todos os blocos.
+6. **Semente fixa (2026)** no gerador aleatório do cenário, atendendo ao requisito de reprodutibilidade.
+
+**Figuras e evidências sugeridas**
+- *Gráfico de barras: ciclos P/E por bloco no mapeamento direto* (dados em `desgaste_direto.csv`): uma barra de 1000
+  no bloco 0 e o resto quase zerado. É a figura mais forte da segunda entrega e será comparada com a do wear leveling na entrega final.
+- *Tela: saída do `./simulador --cenario-quente`* com a tabela de resultados.
+- *Tela: `./simulador` executado duas vezes*, mostrando o P/E do bloco 0 subindo a cada alteração do LBA 0.
+- *Figura: o ciclo read-modify-erase-write* (os 4 passos acima), explicando por que uma alteração pequena custa um bloco inteiro.
+- *Trecho de código: `DirectFTL::rewrite_block()`*.
+
+**Dificuldades e soluções**
+- A página-alvo de uma regravação podia não estar marcada como válida (por exemplo, invalidada pela demonstração da Etapa 3),
+  e então não era regravada. *Solução:* a página-alvo é sempre incluída na regravação com o LBA novo.
+- A amplificação de escrita "total" (9,09) escondia o efeito real, porque incluía o preenchimento inicial, em que nenhuma escrita
+  apaga nada. *Solução:* o cenário mostra também a amplificação só da fase 2 (63,94).
 
 ## Etapa 5: FTL com mapeamento e garbage collection
 
