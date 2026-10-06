@@ -124,6 +124,8 @@ sequenceDiagram
 
 - **Garbage collection:** guloso (greedy). A vítima é o bloco cheio com mais páginas inválidas.
   É disparado quando restam menos de 2 blocos livres, sempre deixando 1 bloco livre para a cópia.
+- **Alocação sem wear leveling (Etapa 5):** entre os blocos livres, escolhe o de menor número.
+  É a política ingênua: o bloco recém-apagado pelo GC tende a ser reutilizado logo em seguida.
 - **Wear leveling dinâmico:** entre os blocos livres, escolhe o de menor contador de P/E.
 - **Wear leveling estático (opcional):** se `P/E máximo − P/E mínimo` passar de um limite (inicialmente 50),
   os dados do bloco menos desgastado são copiados para um bloco livre desgastado.
