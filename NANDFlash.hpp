@@ -1,69 +1,87 @@
+#pragma once
+
 #include <iostream>
 #include <vector>
 #include <cstdint>
 #include <fstream>
 #include <string>
 
-// Tamanhos padr„o configur·veis
-constexpr size_t PAGE_SIZE = 2048;      // 2 KB por p·gina
-constexpr size_t PAGES_PER_BLOCK = 64;  // 64 p·ginas por bloco
-constexpr size_t TOTAL_BLOCKS = 128;    // Total de blocos na mÌdia simulada
-constexpr uint32_t MAX_PE_CYCLES = 1000; // Limite teÛrico de vida ˙til por bloco
+// Tamanhos padr√£o configur√°veis
+constexpr size_t PAGE_SIZE = 2048;      // 2 KB por p√°gina
+constexpr size_t PAGES_PER_BLOCK = 64;  // 64 p√°ginas por bloco
+constexpr size_t TOTAL_BLOCKS = 128;    // Total de blocos na m√≠dia simulada
+constexpr uint32_t MAX_PE_CYCLES = 1000; // Limite te√≥rico de vida √∫til por bloco
 
-// Estado de uma P·gina na MemÛria Flash
+constexpr uint32_t INVALID_LBA = 0xFFFFFFFF; // P√°gina sem LBA associado
+constexpr uint8_t ERASED_BYTE = 0xFF;        // Valor de um byte apagado na NAND
+
+// Estado de uma P√°gina na Mem√≥ria Flash
 enum class PageState : uint8_t {
-    FREE = 0,    // P·gina virgem, pronta para escrita
-    VALID = 1,   // P·gina com dado atualizado e v·lido
-    INVALID = 2  // P·gina com dado obsoleto/sobrescrito
+    FREE = 0,    // P√°gina virgem, pronta para escrita
+    VALID = 1,   // P√°gina com dado atualizado e v√°lido
+    INVALID = 2  // P√°gina com dado obsoleto/sobrescrito
 };
 
-// Estrutura de uma P·gina FÌsica
+// Resultado de uma opera√ß√£o de apagamento
+enum class EraseResult : uint8_t {
+    OK = 0,         // Bloco apagado e ainda utiliz√°vel
+    WORN_OUT = 1,   // Bloco apagado, mas atingiu o limite de P/E e virou bad block
+    BAD_BLOCK = 2,  // Bloco j√° era bad block, nada foi feito
+    IO_ERROR = 3    // Falha ao acessar o arquivo bin√°rio
+};
+
+// Metadados de uma P√°gina F√≠sica (os dados ficam no arquivo bin√°rio)
 struct Page {
     PageState state = PageState::FREE;
-    uint32_t logical_address = 0xFFFFFFFF; // LBA associado (0xFFFFFFFF = nenhum)
-    std::vector<uint8_t> data = std::vector<uint8_t>(PAGE_SIZE, 0xFF);
+    uint32_t logical_address = INVALID_LBA; // LBA associado
 };
 
-// Estrutura de um Bloco FÌsico
+// Metadados de um Bloco F√≠sico
 class NANDBlock {
 public:
     uint32_t block_id;
-    uint32_t pe_cycles = 0;             // Contador de ciclos de ProgramaÁ„o/Apagamento (P/E)
-    bool is_bad_block = false;          // MarcaÁ„o de falha permanente de hardware
-    size_t valid_pages_count = 0;       // Quantidade de p·ginas v·lidas
-    size_t invalid_pages_count = 0;     // Quantidade de p·ginas inv·lidas
+    uint32_t pe_cycles = 0;             // Contador de ciclos de Programa√ß√£o/Apagamento (P/E)
+    bool is_bad_block = false;          // Marca√ß√£o de falha permanente de hardware
+    size_t valid_pages_count = 0;       // Quantidade de p√°ginas v√°lidas
+    size_t invalid_pages_count = 0;     // Quantidade de p√°ginas inv√°lidas
     size_t free_pages_count = PAGES_PER_BLOCK;
 
     std::vector<Page> pages;
 
     explicit NANDBlock(uint32_t id) : block_id(id), pages(PAGES_PER_BLOCK) {}
 
-    // Reseta as p·ginas do bloco para o estado virgem (OperaÁ„o de Apagamento FÌsico)
-    bool erase() {
-        if (is_bad_block) return false;
-
+    // Reseta os metadados do bloco e contabiliza o ciclo P/E.
+    // Deve ser chamado somente ap√≥s o conte√∫do f√≠sico ter sido apagado.
+    EraseResult reset_after_erase() {
         pe_cycles++;
-        if (pe_cycles >= MAX_PE_CYCLES) {
-            is_bad_block = true; // Bloco queimado/inutiliz·vel
-        }
 
         for (auto& page : pages) {
             page.state = PageState::FREE;
-            page.logical_address = 0xFFFFFFFF;
-            std::fill(page.data.begin(), page.data.end(), 0xFF);
+            page.logical_address = INVALID_LBA;
         }
 
         valid_pages_count = 0;
         invalid_pages_count = 0;
         free_pages_count = PAGES_PER_BLOCK;
-        return !is_bad_block;
+
+        if (pe_cycles >= MAX_PE_CYCLES) {
+            is_bad_block = true; // Bloco queimado/inutiliz√°vel
+            return EraseResult::WORN_OUT;
+        }
+        return EraseResult::OK;
     }
 };
 
-// Classe principal de abstraÁ„o do Hardware da MemÛria NAND
+// Classe principal de abstra√ß√£o do Hardware da Mem√≥ria NAND
 class NANDFlashMemory {
 private:
     std::string storage_filename;
+
+    // Posi√ß√£o (em bytes) de uma p√°gina dentro do arquivo bin√°rio
+    static std::streamoff page_offset(uint32_t block_id, uint32_t page_id) {
+        return static_cast<std::streamoff>(
+            (static_cast<size_t>(block_id) * PAGES_PER_BLOCK + page_id) * PAGE_SIZE);
+    }
 
 public:
     std::vector<NANDBlock> blocks;
@@ -75,19 +93,36 @@ public:
         }
     }
 
-    // Inicializa ou recria o arquivo bin·rio que simula a persistÍncia em disco
+    // Inicializa ou recria o arquivo bin√°rio que simula a persist√™ncia em disco
     bool initialize_storage() {
         std::ofstream file(storage_filename, std::ios::binary | std::ios::trunc);
         if (!file.is_open()) return false;
 
-        // Preenche o arquivo bin·rio simulando o tamanho total do dispositivo
-        std::vector<char> empty_page(PAGE_SIZE, static_cast<char>(0xFF));
+        // Preenche o arquivo bin√°rio simulando o tamanho total do dispositivo
+        std::vector<char> empty_page(PAGE_SIZE, static_cast<char>(ERASED_BYTE));
         for (size_t b = 0; b < TOTAL_BLOCKS; ++b) {
             for (size_t p = 0; p < PAGES_PER_BLOCK; ++p) {
                 file.write(empty_page.data(), PAGE_SIZE);
             }
         }
-        return true;
+        return file.good();
+    }
+
+    // Apaga fisicamente um bloco: grava 0xFF em todas as suas p√°ginas no arquivo
+    // bin√°rio e atualiza os metadados (contador P/E e estado das p√°ginas).
+    EraseResult erase_block(uint32_t block_id) {
+        NANDBlock& block = blocks.at(block_id);
+        if (block.is_bad_block) return EraseResult::BAD_BLOCK;
+
+        std::fstream file(storage_filename, std::ios::binary | std::ios::in | std::ios::out);
+        if (!file.is_open()) return EraseResult::IO_ERROR;
+
+        std::vector<char> empty_block(PAGE_SIZE * PAGES_PER_BLOCK, static_cast<char>(ERASED_BYTE));
+        file.seekp(page_offset(block_id, 0));
+        file.write(empty_block.data(), static_cast<std::streamsize>(empty_block.size()));
+        if (!file.good()) return EraseResult::IO_ERROR;
+
+        return block.reset_after_erase();
     }
 
     size_t get_total_blocks() const { return TOTAL_BLOCKS; }
