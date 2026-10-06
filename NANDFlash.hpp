@@ -32,7 +32,8 @@ enum class EraseResult : uint8_t {
     OK = 0,         // Bloco apagado e ainda utilizável
     WORN_OUT = 1,   // Bloco apagado, mas atingiu o limite de P/E e virou bad block
     BAD_BLOCK = 2,  // Bloco já era bad block, nada foi feito
-    IO_ERROR = 3    // Falha ao acessar o arquivo binário
+    IO_ERROR = 3,   // Falha ao acessar o arquivo binário
+    OUT_OF_RANGE = 4 // Bloco inexistente
 };
 
 // Resultado da abertura de um dispositivo já existente
@@ -116,6 +117,17 @@ private:
     std::string data_filename;
     std::string meta_filename;
 
+    // Arquivo de dados mantido aberto enquanto o dispositivo está em uso,
+    // para não reabrir o arquivo a cada operação de página.
+    std::fstream device;
+
+    bool attach_device() {
+        device.close();
+        device.clear();
+        device.open(data_filename, std::ios::binary | std::ios::in | std::ios::out);
+        return device.is_open();
+    }
+
     // Posição (em bytes) de uma página dentro do arquivo binário
     static std::streamoff page_offset(uint32_t block_id, uint32_t page_id) {
         return static_cast<std::streamoff>(
@@ -169,17 +181,25 @@ public:
     // Formata o dispositivo: recria o arquivo de dados com 0xFF, zera todos os
     // contadores (como um chip novo de fábrica) e grava os metadados.
     bool format() {
+        device.close();
         for (auto& block : blocks) block.reset_to_factory();
-        return create_data_file() && save_metadata();
+        return create_data_file() && attach_device() && save_metadata();
     }
 
     // Abre um dispositivo já existente, recarregando o desgaste acumulado.
+    // Se a abertura falhar, o dispositivo que já estava em uso continua intacto.
     OpenResult open() {
-        std::ifstream data(data_filename, std::ios::binary | std::ios::ate);
-        if (!data.is_open()) return OpenResult::NO_DEVICE;
-        if (data.tellg() != device_size()) return OpenResult::GEOMETRY_MISMATCH;
-        return load_metadata();
+        {
+            std::ifstream data(data_filename, std::ios::binary | std::ios::ate);
+            if (!data.is_open()) return OpenResult::NO_DEVICE;
+            if (data.tellg() != device_size()) return OpenResult::GEOMETRY_MISMATCH;
+        }
+        OpenResult result = load_metadata();
+        if (result == OpenResult::OK && !attach_device()) return OpenResult::IO_ERROR;
+        return result;
     }
+
+    bool is_open() const { return device.is_open(); }
 
     // Grava os metadados em nand_meta.bin.
     // Formato: cabeçalho (assinatura, versão e geometria) seguido, para cada
@@ -258,18 +278,49 @@ public:
     // Apaga fisicamente um bloco: grava 0xFF em todas as suas páginas no arquivo
     // binário e atualiza os metadados (contador P/E e estado das páginas).
     EraseResult erase_block(uint32_t block_id) {
-        NANDBlock& block = blocks.at(block_id);
+        if (block_id >= TOTAL_BLOCKS) return EraseResult::OUT_OF_RANGE;
+        NANDBlock& block = blocks[block_id];
         if (block.is_bad_block) return EraseResult::BAD_BLOCK;
 
-        std::fstream file(data_filename, std::ios::binary | std::ios::in | std::ios::out);
-        if (!file.is_open()) return EraseResult::IO_ERROR;
+        if (!device.is_open()) return EraseResult::IO_ERROR;
 
-        std::vector<char> empty_block(PAGE_SIZE * PAGES_PER_BLOCK, static_cast<char>(ERASED_BYTE));
-        file.seekp(page_offset(block_id, 0));
-        file.write(empty_block.data(), static_cast<std::streamsize>(empty_block.size()));
-        if (!file.good()) return EraseResult::IO_ERROR;
+        static const std::vector<char> empty_block(PAGE_SIZE * PAGES_PER_BLOCK,
+                                                   static_cast<char>(ERASED_BYTE));
+        device.seekp(page_offset(block_id, 0));
+        device.write(empty_block.data(), static_cast<std::streamsize>(empty_block.size()));
+        device.flush();
+        if (!device.good()) {
+            device.clear();
+            return EraseResult::IO_ERROR;
+        }
 
         return block.reset_after_erase();
+    }
+
+    // Operações "elétricas" de página: leem e gravam os 2 KB no arquivo, sem
+    // nenhuma regra. As regras da Flash (não sobrescrever, não usar bad block,
+    // atualizar estados) ficam no driver de E/S (IODriver.hpp).
+    bool read_page_data(uint32_t block_id, uint32_t page_id, uint8_t* buffer) {
+        if (!device.is_open()) return false;
+        device.seekg(page_offset(block_id, page_id));
+        device.read(reinterpret_cast<char*>(buffer), PAGE_SIZE);
+        if (!device.good()) {
+            device.clear();
+            return false;
+        }
+        return true;
+    }
+
+    bool write_page_data(uint32_t block_id, uint32_t page_id, const uint8_t* data) {
+        if (!device.is_open()) return false;
+        device.seekp(page_offset(block_id, page_id));
+        device.write(reinterpret_cast<const char*>(data), PAGE_SIZE);
+        device.flush();
+        if (!device.good()) {
+            device.clear();
+            return false;
+        }
+        return true;
     }
 
     // Resumo do desgaste, útil para o shell e para os testes
