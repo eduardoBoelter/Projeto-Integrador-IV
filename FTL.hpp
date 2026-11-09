@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <vector>
 #include "IODriver.hpp"
 
@@ -191,7 +193,9 @@ public:
     // Abaixo deste número de blocos livres, o GC é acionado antes de abrir um novo bloco ativo
     static constexpr size_t GC_MIN_FREE_BLOCKS = 2;
 
-private:
+protected:
+    // protected (e não private) para a FTL com wear leveling (Etapa 6) reaproveitar
+    // a tabela, a lista de blocos livres e o GC, mudando só as políticas.
     static constexpr uint32_t NO_BLOCK = 0xFFFFFFFF;
 
     std::vector<PhysicalAddress> l2p;   // tabela de mapeamento: LBA -> PBA
@@ -257,7 +261,11 @@ private:
                 // Libera espaço antes de consumir mais um bloco livre
                 while (free_count < GC_MIN_FREE_BLOCKS && collect_garbage()) {}
             }
-            if (!open_new_active_block()) return FTLResult::DEVICE_WORN_OUT;
+            // O próprio GC pode ter aberto um bloco ativo novo ao copiar as páginas
+            // válidas; nesse caso ele ainda tem páginas livres e deve ser usado.
+            if (active_block == NO_BLOCK || next_page >= PAGES_PER_BLOCK) {
+                if (!open_new_active_block()) return FTLResult::DEVICE_WORN_OUT;
+            }
         }
 
         PhysicalAddress target{active_block, next_page++};
@@ -271,53 +279,69 @@ private:
         return FTLResult::OK;
     }
 
-    // Escolha da vítima: política gulosa (greedy), o bloco com mais páginas
-    // inválidas, pois é o que libera mais espaço copiando menos.
+    // Escolha da vítima: política gulosa (greedy), o bloco que libera mais
+    // espaço copiando menos, ou seja, com mais páginas NÃO válidas (inválidas,
+    // ou livres que sobraram num bloco que não é mais o ativo).
     uint32_t select_victim() const {
         uint32_t victim = NO_BLOCK;
-        size_t most_invalid = 0;
+        size_t most_reclaimable = 0;
         for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
             if (is_free[b] || b == active_block) continue;
             const NANDBlock& block = driver.block_info(b);
             if (block.is_bad_block) continue;
-            if (block.invalid_pages_count > most_invalid) {
-                most_invalid = block.invalid_pages_count;
+            size_t reclaimable = block.invalid_pages_count + block.free_pages_count;
+            if (reclaimable > most_reclaimable) {
+                most_reclaimable = reclaimable;
                 victim = b;
             }
         }
         return victim;
     }
 
+    // Copia para o bloco ativo as páginas válidas de um bloco (as que a tabela
+    // ainda aponta). Retorna quantas copiou, ou -1 em caso de erro.
+    long copy_valid_pages(uint32_t block_id) {
+        std::vector<uint8_t> buffer(PAGE_SIZE);
+        long copied = 0;
+        for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
+            const Page& page = driver.block_info(block_id).pages[p];
+            if (page.state != PageState::VALID) continue;
+            uint32_t lba = page.logical_address;
+            // Cópia antiga que a tabela não aponta mais (por exemplo, num dispositivo
+            // usado antes por outro modo): não é copiada, será apagada com o bloco.
+            if (lba >= LOGICAL_PAGES || !mapped[lba] || l2p[lba].block != block_id || l2p[lba].page != p)
+                continue;
+            if (driver.read_page({block_id, p}, buffer.data()) != IOResult::OK) return -1;
+            if (append(lba, buffer.data(), false) != FTLResult::OK) return -1;
+            copied++;
+        }
+        return copied;
+    }
+
+    // Apaga um bloco cujos dados válidos já estão em outro lugar e o devolve à
+    // lista de livres. Se ele morrer neste apagamento, nenhum dado é perdido:
+    // só a capacidade diminui.
+    bool erase_and_free(uint32_t block_id) {
+        EraseResult erased = driver.erase_block(block_id);
+        note_erase(erased, block_id);
+        if (erased == EraseResult::OK) {
+            is_free[block_id] = true;
+            free_count++;
+        }
+        return erased == EraseResult::OK || erased == EraseResult::WORN_OUT;
+    }
+
     // Uma rodada de garbage collection. Retorna false se não há o que coletar.
     bool collect_garbage() {
         uint32_t victim = select_victim();
         if (victim == NO_BLOCK) return false;
-
         // 1. Copia as páginas ainda válidas da vítima para o bloco ativo
-        std::vector<uint8_t> buffer(PAGE_SIZE);
-        for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
-            const Page& page = driver.block_info(victim).pages[p];
-            if (page.state != PageState::VALID) continue;
-            uint32_t lba = page.logical_address;
-            // Cópia antiga que a tabela não aponta mais (por exemplo, num dispositivo
-            // usado antes por outro modo): não é copiada, será apagada com a vítima.
-            if (lba >= LOGICAL_PAGES || !mapped[lba] || l2p[lba].block != victim || l2p[lba].page != p)
-                continue;
-            if (driver.read_page({victim, p}, buffer.data()) != IOResult::OK) return false;
-            if (append(lba, buffer.data(), false) != FTLResult::OK) return false;
-            gc_stats.pages_copied++;
-        }
-
-        // 2. Apaga a vítima. Se ela morrer neste apagamento, os dados já
-        //    estão a salvo em outro bloco: só a capacidade diminui.
-        EraseResult erased = driver.erase_block(victim);
-        note_erase(erased, victim);
+        long copied = copy_valid_pages(victim);
+        if (copied < 0) return false;
+        gc_stats.pages_copied += static_cast<uint64_t>(copied);
         gc_stats.runs++;
-        if (erased == EraseResult::OK) {
-            is_free[victim] = true;
-            free_count++;
-        }
-        return erased == EraseResult::OK || erased == EraseResult::WORN_OUT;
+        // 2. Apaga a vítima
+        return erase_and_free(victim);
     }
 
 protected:
@@ -332,6 +356,10 @@ protected:
 
     bool block_is_free(uint32_t block_id) const { return is_free[block_id]; }
 
+    // Gancho chamado depois de cada escrita lógica bem-sucedida. Sem wear
+    // leveling não faz nada; a Etapa 6 usa para o nivelamento estático.
+    virtual void after_host_write() {}
+
 public:
     explicit PageMappingFTL(IODriver& io) : FTL(io) { rebuild(); }
 
@@ -340,7 +368,9 @@ public:
     FTLResult write(uint32_t lba, const uint8_t* data) override {
         if (lba >= LOGICAL_PAGES) return FTLResult::OUT_OF_RANGE;
         ftl_stats.host_writes++;
-        return append(lba, data, true);
+        FTLResult result = append(lba, data, true);
+        if (result == FTLResult::OK) after_host_write();
+        return result;
     }
 
     FTLResult read(uint32_t lba, uint8_t* buffer) override {
@@ -364,6 +394,155 @@ public:
     const GCStats& gc() const { return gc_stats; }
 };
 
+// ---------------------------------------------------------------------------
+// Etapa 6: FTL com mapeamento de páginas + WEAR LEVELING (o objeto da pesquisa).
+//
+// Reaproveita tudo da PageMappingFTL (tabela, escrita fora do lugar e GC) e
+// muda apenas as políticas de desgaste:
+//
+// 1. Wear leveling DINÂMICO: ao abrir um novo bloco ativo, escolhe, entre os
+//    blocos livres, o de MENOR contador P/E (em vez do de menor número).
+//    Assim, as escritas novas (que são quase sempre dados quentes) vão para
+//    os blocos menos gastos.
+//
+// 2. Wear leveling ESTÁTICO: o dinâmico só escolhe entre blocos LIVRES. Um
+//    bloco cheio de dados frios (que nunca mudam) nunca fica livre e por isso
+//    nunca é gasto, enquanto os outros envelhecem. Quando a diferença entre o
+//    bloco mais gasto e o bloco de dados menos gasto passa de um limite, os
+//    dados frios são movidos para o bloco livre MAIS gasto (que, guardando
+//    dados frios, quase não será mais apagado) e o bloco pouco gasto volta
+//    para a lista de livres, onde o dinâmico passa a usá-lo.
+// ---------------------------------------------------------------------------
+
+// Contadores próprios do wear leveling estático
+struct WLStats {
+    uint64_t static_migrations = 0;  // quantas vezes dados frios foram movidos
+    uint64_t pages_moved = 0;        // páginas válidas copiadas por essas migrações
+};
+
+class WearLevelingFTL : public PageMappingFTL {
+public:
+    // Diferença máxima de P/E tolerada antes de mover dados frios
+    static constexpr uint32_t STATIC_WL_THRESHOLD = 50;
+    // A verificação do estático é feita a cada N escritas lógicas (é barata,
+    // mas não precisa ser feita sempre)
+    static constexpr uint32_t STATIC_WL_CHECK_INTERVAL = 64;
+    // Só blocos com pelo menos 3/4 de páginas válidas vão para o bloco gasto;
+    // os outros têm as poucas páginas válidas copiadas para o bloco ativo
+    static constexpr size_t MIN_COLD_VALID_PAGES = PAGES_PER_BLOCK * 3 / 4;
+
+private:
+    bool use_static;
+    uint32_t writes_since_check = 0;
+    WLStats wl_stats;
+
+    // Bloco de dados (não livre, não ativo, não bad) com menor P/E:
+    // é o que guarda os dados mais frios.
+    uint32_t coldest_data_block() const {
+        uint32_t chosen = NO_BLOCK;
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
+            if (is_free[b] || b == active_block) continue;
+            const NANDBlock& block = driver.block_info(b);
+            if (block.is_bad_block) continue;
+            if (chosen == NO_BLOCK || block.pe_cycles < driver.block_info(chosen).pe_cycles) chosen = b;
+        }
+        return chosen;
+    }
+
+    // Bloco livre com MAIOR P/E: destino dos dados frios
+    uint32_t most_worn_free_block() const {
+        uint32_t chosen = NO_BLOCK;
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
+            if (!is_free[b]) continue;
+            if (chosen == NO_BLOCK || driver.block_info(b).pe_cycles > driver.block_info(chosen).pe_cycles) chosen = b;
+        }
+        return chosen;
+    }
+
+    // Move os dados válidos do bloco frio para o bloco livre mais gasto e
+    // apaga o bloco frio, devolvendo-o à lista de livres.
+    bool migrate_cold_block(uint32_t source, uint32_t target) {
+        is_free[target] = false;
+        free_count--;
+
+        std::vector<uint8_t> buffer(PAGE_SIZE);
+        uint32_t next = 0;
+        for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
+            const Page& page = driver.block_info(source).pages[p];
+            if (page.state != PageState::VALID) continue;
+            uint32_t lba = page.logical_address;
+            if (lba >= LOGICAL_PAGES || !mapped[lba] || l2p[lba].block != source || l2p[lba].page != p)
+                continue;
+            if (driver.read_page({source, p}, buffer.data()) != IOResult::OK) return false;
+            PhysicalAddress dest{target, next++};
+            if (driver.program_page(dest, buffer.data(), lba) != IOResult::OK) return false;
+            driver.invalidate_page(l2p[lba]);
+            l2p[lba] = dest;
+            wl_stats.pages_moved++;
+        }
+
+        wl_stats.static_migrations++;
+        return erase_and_free(source);
+    }
+
+    void check_static_wear_leveling() {
+        // Precisa de um bloco livre para receber os dados frios. A migração não
+        // consome espaço: ocupa 1 bloco livre e devolve o bloco frio apagado.
+        if (free_count == 0) return;
+        uint32_t source = coldest_data_block();
+        uint32_t target = most_worn_free_block();
+        if (source == NO_BLOCK || target == NO_BLOCK) return;
+        uint32_t cold_pe = driver.block_info(source).pe_cycles;
+        uint32_t hot_pe = driver.block_info(target).pe_cycles;
+        if (hot_pe <= cold_pe || hot_pe - cold_pe <= STATIC_WL_THRESHOLD) return;
+        if (driver.block_info(source).valid_pages_count >= MIN_COLD_VALID_PAGES) {
+            // Dados frios de verdade: vão para o bloco mais gasto, que quase não
+            // será apagado de novo
+            migrate_cold_block(source, target);
+        } else {
+            // Bloco pouco gasto, mas quase sem dados válidos. Copiar para o bloco
+            // gasto deixaria o fim dele livre, a coleta de lixo logo o apagaria de
+            // novo e ele seria escolhido outra vez. As poucas páginas vão para o
+            // bloco ativo, como no GC, e o bloco pouco gasto volta para os livres.
+            long copied = copy_valid_pages(source);
+            if (copied < 0) return;
+            wl_stats.pages_moved += static_cast<uint64_t>(copied);
+            wl_stats.static_migrations++;
+            erase_and_free(source);
+        }
+    }
+
+protected:
+    // Wear leveling dinâmico: o bloco livre menos desgastado
+    uint32_t select_free_block() const override {
+        uint32_t chosen = NO_BLOCK;
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
+            if (!is_free[b]) continue;
+            if (chosen == NO_BLOCK || driver.block_info(b).pe_cycles < driver.block_info(chosen).pe_cycles) chosen = b;
+        }
+        return chosen;
+    }
+
+    void after_host_write() override {
+        if (!use_static) return;
+        if (++writes_since_check < STATIC_WL_CHECK_INTERVAL) return;
+        writes_since_check = 0;
+        check_static_wear_leveling();
+    }
+
+public:
+    // with_static = false: só o dinâmico; true: dinâmico + estático
+    WearLevelingFTL(IODriver& io, bool with_static) : PageMappingFTL(io), use_static(with_static) {}
+
+    const char* name() const override {
+        return use_static ? "Mapeamento com wear leveling dinamico + estatico"
+                          : "Mapeamento com wear leveling dinamico";
+    }
+
+    const WLStats& wl() const { return wl_stats; }
+    bool static_enabled() const { return use_static; }
+};
+
 inline const char* to_string(FTLResult result) {
     switch (result) {
         case FTLResult::OK:              return "OK";
@@ -372,4 +551,36 @@ inline const char* to_string(FTLResult result) {
         case FTLResult::IO_ERROR:        return "IO_ERROR";
     }
     return "?";
+}
+
+// ---------------------------------------------------------------------------
+// Modos da FTL (Etapa 8): usados pelo shell e pelos experimentos.
+// ---------------------------------------------------------------------------
+enum class FTLMode { DIRECT, MAPPING, WL_DYNAMIC, WL_STATIC };
+
+inline const char* mode_key(FTLMode mode) {
+    switch (mode) {
+        case FTLMode::DIRECT:     return "direto";
+        case FTLMode::MAPPING:    return "mapeamento";
+        case FTLMode::WL_DYNAMIC: return "dinamico";
+        case FTLMode::WL_STATIC:  return "estatico";
+    }
+    return "?";
+}
+
+inline bool parse_mode(const std::string& text, FTLMode& mode) {
+    for (FTLMode m : {FTLMode::DIRECT, FTLMode::MAPPING, FTLMode::WL_DYNAMIC, FTLMode::WL_STATIC}) {
+        if (text == mode_key(m)) { mode = m; return true; }
+    }
+    return false;
+}
+
+inline std::unique_ptr<FTL> make_ftl(FTLMode mode, IODriver& driver) {
+    switch (mode) {
+        case FTLMode::DIRECT:     return std::make_unique<DirectFTL>(driver);
+        case FTLMode::MAPPING:    return std::make_unique<PageMappingFTL>(driver);
+        case FTLMode::WL_DYNAMIC: return std::make_unique<WearLevelingFTL>(driver, false);
+        case FTLMode::WL_STATIC:  return std::make_unique<WearLevelingFTL>(driver, true);
+    }
+    return nullptr;
 }

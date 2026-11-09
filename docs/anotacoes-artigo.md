@@ -1,4 +1,4 @@
-# Anotações para o artigo: segunda entrega
+# Anotações para o artigo
 
 Este arquivo junta, etapa por etapa, o material para a **seção de Desenvolvimento** do artigo.
 Ele é atualizado ao fim de cada etapa e será usado para escrever o artigo depois da Etapa 5.
@@ -341,3 +341,283 @@ Etapas executadas: 0 a 5 (ambiente, requisitos e modelagem, camada física, driv
 
 Próximos passos (entrega final): wear leveling dinâmico e estático (Etapa 6), sistema de arquivos mínimo (7),
 shell interativo (8), métricas completas (9), bateria de testes comparativos com gráficos (10) e fechamento do artigo (11).
+
+---
+
+# Entrega final (Etapas 6 a 11)
+
+## Etapa 6: Wear leveling dinâmico e estático (concluída)
+
+**O que foi feito**
+- Nova classe `WearLevelingFTL` (em `FTL.hpp`), derivada da `PageMappingFTL`. Reaproveita a tabela LBA → PBA,
+  a escrita fora do lugar e o GC; muda só as políticas de desgaste.
+- **Dinâmico:** `select_free_block()` passa a escolher, entre os blocos livres, o de **menor contador P/E**.
+- **Estático:** a cada 64 escritas lógicas, compara o bloco livre mais gasto com o bloco de dados menos gasto.
+  Se a diferença passar de **50 ciclos**, os dados frios são copiados para o bloco livre mais gasto e o bloco
+  pouco gasto é apagado e volta à lista de livres, onde o dinâmico passa a usá-lo.
+- O cenário `./simulador --cenario-quente` agora roda quatro modos: `direto`, `mapeamento`, `wl_dinamico` e `wl_estatico`.
+- Novo teste `tests/test_wear_leveling.cpp` (17 verificações).
+
+**Resultados do cenário de dados quentes (até a primeira falha de bloco)**
+
+Valores **depois da correção feita na Etapa 7** (ver "Correção da Etapa 5" abaixo):
+
+| Modo | Escritas na fase 2 | Média P/E | Desvio padrão | CV | Amplificação |
+|---|---|---|---|---|---|
+| Direto | 1.132 | 8,84 | 87,96 | 9,95 | 63,94 |
+| Mapeamento sem WL | 625.777 | 236,04 | 142,72 | 0,60 | 3,09 |
+| WL dinâmico | 2.601.162 | 984,34 | 87,38 | 0,09 | 3,10 |
+| WL dinâmico + estático | 2.620.210 | 991,68 | 2,74 | 0,00 | 3,10 |
+
+Interpretação para o texto:
+- Neste cenário sintético, 10% das escritas caem em LBAs aleatórios: quase todo bloco acaba tendo páginas inválidas
+  e passa pelo GC. Por isso o dinâmico sozinho já espalha bem o desgaste (vida 4,2 vezes maior que sem WL).
+- O estático quase não muda a vida útil aqui (+0,7%), mas zera a diferença entre blocos: desvio de 87,38 para 2,74.
+  No dinâmico ainda sobra 1 bloco nunca apagado (dados que nunca mudaram).
+- O efeito do estático aparece de verdade na carga do sistema de arquivos (Etapa 7), onde há arquivos realmente frios.
+
+**Decisões técnicas**
+1. Wear leveling como **subclasse**: os modos comparados compartilham o mesmo código de mapeamento e GC, então a diferença
+   medida vem só da política de desgaste.
+2. Limite do estático de **50 ciclos** (5% da vida), como previsto na arquitetura; verificação a cada 64 escritas,
+   para não percorrer os 128 blocos em toda escrita.
+3. Os dados frios vão para o bloco livre **mais gasto**, que quase não será apagado de novo porque dados frios não mudam.
+
+**Dificuldades e soluções**
+- Na primeira versão, o estático só agia com mais de 2 blocos livres e **nunca migrou nada**: com o disco cheio,
+  o GC mantém de 1 a 2 blocos livres. *Solução:* a migração não consome espaço (ocupa 1 bloco livre e devolve o bloco
+  frio apagado), então basta haver 1 bloco livre.
+
+**Figuras sugeridas**
+- Gráfico de barras do desgaste por bloco nos quatro modos (`desgaste_<modo>.csv`).
+- Trecho de código: `check_static_wear_leveling()` e `select_free_block()` da `WearLevelingFTL`.
+
+## Etapa 7: Sistema de arquivos mínimo e gerador de carga (concluída)
+
+**O que foi feito**
+- `SimpleFS.hpp`: sistema de arquivos no estilo FAT, só com o necessário para gerar a carga de um pendrive.
+  - LBA 0: superbloco (assinatura, espaço livre, número de arquivos, contador de operações).
+  - LBAs 1 a 8: tabela de alocação (FAT), 2 bytes por LBA de dados.
+  - LBA 9: diretório com até 32 arquivos (64 bytes por entrada).
+  - LBAs 10 a 7679: área de dados (7.670 LBAs, cerca de 15 MB).
+  - Operações: `format`, `mount`, `create`, `write_file`, `read_file`, `remove`, `list`.
+  - **Toda operação regrava o superbloco, o diretório e as páginas da FAT que mudaram**: são os dados quentes.
+- `Workload.hpp`: gerador de carga que imita o uso de um pendrive.
+  - Preparação: arquivos grandes ("fotos" e "músicas", 256 a 900 KB) até ocupar 60% do disco. Nunca mudam (dados frios).
+  - Uso: 70% editar um documento (2 a 16 KB), 20% criar um documento, 10% apagar. Semente fixa.
+- Novo teste `tests/test_fs.cpp` (29 verificações).
+
+**Correção da Etapa 5 encontrada nesta etapa**
+- Ao medir a carga do sistema de arquivos, apareceram blocos parcialmente gravados que não eram o bloco ativo.
+  Causa: quando o GC rodava, ele podia abrir um bloco ativo novo para copiar as páginas válidas, e logo depois a
+  escrita abria **outro** bloco, abandonando as páginas livres do primeiro.
+  *Solução:* a escrita só abre bloco novo se o bloco ativo ainda estiver cheio depois do GC.
+- O GC também passou a contar as páginas livres que sobraram num bloco que não é o ativo como espaço recuperável
+  (necessário depois das migrações do wear leveling estático, que podem deixar o fim do bloco livre).
+- Com a correção, os números do mapeamento sem WL mudaram (1.345.345 → 625.777 escritas no cenário de dados quentes).
+  **Os resultados da segunda entrega usavam a versão com o defeito**; os da entrega final usam a versão corrigida.
+  Boa "dificuldade encontrada" para o artigo: o defeito só apareceu porque a nova carga foi medida bloco a bloco.
+
+**Primeira medição com a carga do sistema de arquivos (até a primeira falha)**
+
+| Modo | Escritas lógicas até a falha | Média P/E | Desvio padrão |
+|---|---|---|---|
+| Direto | 6.996 | 15,9 | 122,5 |
+| Mapeamento sem WL | 879.105 | 106,3 | 265,5 |
+| WL dinâmico | 1.027.841 | 124,5 | 296,5 |
+| WL dinâmico + estático | 5.428.161 | 844,2 | 40,5 |
+
+- Com arquivos realmente frios (60% do disco), o dinâmico quase não ajuda (+17%): os blocos das fotos nunca ficam livres.
+- O estático move essas fotos para blocos gastos e libera os blocos novos: **vida útil 6,2 vezes maior** que sem WL.
+- Esses números são revistos na Etapa 10, com as métricas completas.
+- *Atualização da Etapa 11:* a linha do estático tinha um defeito (ver "Correção do wear leveling estático" na
+  Etapa 11). Corrigido, o estático chega a 7.827.705 escritas lógicas até a falha (8,9 vezes o mapeamento sem WL).
+
+**Decisões técnicas**
+1. FAT com primeiro LBA livre (*first fit*), como o FAT real: os mesmos LBAs de dados são reutilizados.
+2. Diretório de uma única página e FAT de 8 páginas, para concentrar os metadados em 10 LBAs.
+3. O gerador de carga tem semente fixa e usa só a interface do SimpleFS, então roda igual nos quatro modos.
+
+## Etapa 8: Shell interativo (concluída)
+
+**O que foi feito**
+- `Shell.hpp`: shell de comandos sobre o pendrive simulado. `./simulador` sem opções abre o shell.
+- Comandos: `formatar <modo>`, `modo`, `ls`, `criar`, `escrever`, `ler`, `apagar`, `carga <n>`, `estatisticas`,
+  `desgaste` (mapa 16 × 8 com os ciclos P/E de cada bloco), `ajuda` e `sair`.
+- O modo da FTL é escolhido na formatação e salvo em `nand_config.txt`: cada modo organiza os dados de um jeito,
+  então trocar de modo exige formatar.
+- O desgaste é salvo depois de cada comando, então fechar o programa não perde nada.
+- Aceita roteiros: `./simulador < comandos.txt`, útil para a apresentação.
+- A demonstração antiga virou `./simulador --demo` e usa arquivos próprios.
+- Novo teste `tests/test_shell.cpp` (14 verificações), que roda três sessões seguidas e confere a saída.
+
+**Decisões técnicas**
+1. Comandos em português e sem acentos na saída, para aparecer certo no CMD do Windows.
+2. O shell só conhece a interface de cada camada (`SimpleFS`, `FTL`, `IODriver`), sem acessar os blocos por fora.
+3. O `carga <n>` reaproveita o gerador da Etapa 7; se o disco estiver quase vazio, copia antes as fotos e músicas.
+
+**Figura sugerida**
+- Tela do shell: `formatar estatico`, `escrever`, `ler`, `carga 500`, `estatisticas` e `desgaste`.
+
+## Etapa 9: Coleta de métricas (concluída)
+
+**O que foi feito**
+- `Metrics.hpp`: métricas calculadas a partir dos contadores P/E da camada física.
+  - Resumo do desgaste: média, desvio padrão, coeficiente de variação (CV = desvio / média), mínimo, máximo,
+    mediana, percentis 10 e 90, blocos nunca apagados, bad blocks e vida usada (média / 1000).
+  - `WearTimeline`: evolução do desgaste ao longo das escritas. Começa com uma amostra a cada 50 escritas;
+    quando passa de 400 amostras, descarta uma sim, outra não, e dobra o intervalo. Assim a curva tem sempre
+    entre 200 e 400 pontos, tanto no modo direto (milhares de escritas) quanto no estático (milhões).
+  - Exportação em CSV: desgaste por bloco (uma coluna por modo) e evolução.
+- `Experiment.hpp`: um experimento formata um dispositivo próprio, aplica uma carga num modo da FTL até o
+  primeiro bloco falhar e devolve todas as métricas. As duas cargas (dados quentes e sistema de arquivos)
+  agora passam pelo mesmo código.
+- `./simulador --cenario-quente` e `./simulador --cenario-fs` mostram a tabela comparativa e exportam
+  `<cenario>_resumo.csv`, `<cenario>_desgaste_por_bloco.csv` e `<cenario>_evolucao_<modo>.csv`.
+- No shell, `estatisticas` passou a mostrar o resumo completo do desgaste e o novo comando `exportar <arquivo.csv>`
+  grava os ciclos P/E dos 128 blocos.
+- Novo teste `tests/test_metrics.cpp` (22 verificações) e 2 verificações novas no teste do shell.
+  `make test` passou a ter 179 verificações, todas passando.
+
+**Por que essas métricas**
+- O desvio padrão sozinho engana: um desvio de 87 é enorme se a média é 9, e pequeno se a média é 984.
+  O **CV** compara modos com médias diferentes.
+- A **vida usada** mostra quanto da capacidade total de apagamentos foi aproveitada até a primeira falha.
+  Sem wear leveling, o pendrive "morre" com quase todos os blocos novos.
+- A **amplificação de escrita (WA)** mede o custo: páginas gravadas na NAND por escrita lógica.
+
+**Resultados com as métricas completas (escritas lógicas da fase de carga até a primeira falha)**
+
+Cenário de dados quentes:
+
+| Modo | Escritas | Média P/E | Desvio | CV | Mín | Vida usada | WA |
+|---|---|---|---|---|---|---|---|
+| Direto | 1.132 | 8,8 | 88,0 | 9,95 | 0 | 0,9% | 63,94 |
+| Mapeamento sem WL | 625.777 | 236,0 | 142,7 | 0,60 | 0 | 23,6% | 3,09 |
+| WL dinâmico | 2.601.162 | 984,3 | 87,4 | 0,09 | 0 | 98,4% | 3,10 |
+| WL dinâmico + estático | 2.620.210 | 991,7 | 2,7 | 0,003 | 976 | 99,2% | 3,10 |
+
+Cenário do sistema de arquivos:
+
+| Modo | Escritas | Média P/E | Desvio | CV | Mín | Vida usada | WA |
+|---|---|---|---|---|---|---|---|
+| Direto | 2.013 | 15,9 | 122,5 | 7,71 | 0 | 1,6% | 59,18 |
+| Mapeamento sem WL | 874.122 | 106,3 | 265,5 | 2,50 | 0 | 10,6% | 1,00 |
+| WL dinâmico | 1.022.858 | 124,5 | 296,5 | 2,38 | 0 | 12,4% | 1,00 |
+| WL dinâmico + estático | 7.822.722 | 966,7 | 11,7 | 0,01 | 949 | 96,7% | 1,01 |
+
+- Os números do cenário quente batem com os da Etapa 7 (mesma semente), agora medidos pelo código comum.
+- No cenário do sistema de arquivos, a WA fica perto de 1: as edições regravam o arquivo inteiro e o FS
+  libera os LBAs antigos, então o GC encontra blocos quase todos inválidos.
+- O estático custa pouco: 22.409 ações em 7,8 milhões de escritas (WA de 1,00 para 1,01).
+- *Linha do estático atualizada na Etapa 11*, depois da correção do defeito (antes: 5.423.178 escritas,
+  desvio 40,5, mínimo 813, 84,4% da vida).
+
+**Decisões técnicas**
+1. Métricas calculadas só a partir dos contadores P/E da NAND, que a camada física já mantinha desde a Etapa 2.
+2. Amostragem com intervalo que dobra, para a curva de evolução ter tamanho parecido em todos os modos.
+3. Cada experimento usa arquivos próprios e os apaga no fim, para não estragar o pendrive do shell.
+
+## Etapa 10: Testes comparativos, gráficos e tela de resultados (concluída)
+
+**O que foi feito**
+- `./simulador --comparar` roda as duas cargas (uso de pendrive e dados quentes) nos quatro modos da FTL,
+  sempre com a mesma sequência de escritas, até a primeira falha de bloco. Mostra as tabelas no terminal,
+  exporta os CSVs e grava a **tela de resultados** `resultados.html`, que abre sozinha no navegador.
+  No shell, o comando `comparar` faz o mesmo. Leva cerca de 2 minutos.
+- A tela de resultados atende à crítica da segunda entrega (o projeto era só terminal). Ela mostra:
+  - destaque: quantas vezes mais escritas o wear leveling estático aguentou que o mapeamento sem WL;
+  - escritas até a primeira falha (barras) e vida aproveitada dos blocos (medidores);
+  - mapa de desgaste dos 128 blocos em cada modo (o bloco que falhou aparece com ✕);
+  - histograma dos ciclos P/E (faixas de 100 ciclos);
+  - evolução do bloco mais gasto e da média ao longo das escritas até a falha;
+  - tabela com todas as métricas e um glossário ("Como ler esta página").
+- `Report.hpp`: monta os resultados em JSON e grava a página; `ReportPage.hpp`: o modelo da página (HTML, CSS e
+  JavaScript embutidos no executável). Passar o mouse mostra os valores de cada bloco e de cada ponto.
+- `docs/resultados.md`: tabelas, figuras e análise; `docs/resultados.html`: exemplo da página já gerada.
+- Novo teste `tests/test_report.cpp` (15 verificações). `make test`: 196 verificações, todas passando
+  (202 depois do teste novo da Etapa 11).
+
+**Decisões técnicas**
+1. Página HTML única, gerada pelo próprio programa em C++: roda em qualquer máquina com navegador, sem
+   instalar biblioteca gráfica, sem internet e sem mudar a compilação (`g++ main.cpp` continua igual).
+2. Os dados entram na página como JSON e os gráficos são desenhados em SVG pelo navegador, na largura da tela
+   (funciona no computador e no celular, com tema claro ou escuro).
+3. Uma cor por função: azul para o desgaste (mapa do mais claro ao mais escuro), laranja para o bloco mais
+   gasto, vermelho com ✕ só para bad block. Os números estão sempre escritos, não só na cor.
+4. O texto que vai para dentro do JSON é escapado (inclusive `<`), para nenhum nome quebrar a página.
+
+**Resultado principal (para a seção de Resultados do artigo)**
+
+| Carga | Sem WL | WL dinâmico | WL dinâmico + estático |
+|---|---|---|---|
+| Uso de pendrive: escritas até a falha | 874.122 | 1.022.858 (1,17×) | 7.822.722 (**8,9×**) |
+| Uso de pendrive: vida aproveitada | 10,6% | 12,4% | **96,7%** |
+| Dados quentes: escritas até a falha | 625.777 | 2.601.162 (4,2×) | 2.620.210 (**4,2×**) |
+| Dados quentes: desvio padrão | 142,7 | 87,4 | **2,7** |
+
+- O dinâmico basta quando todos os dados mudam de vez em quando; com dados frios de verdade (fotos e músicas),
+  só o estático aproveita os blocos que guardam esses dados.
+- O custo do estático é de cerca de 1% de escritas extras (WA de 1,00 para 1,01 no uso de pendrive).
+- O mapeamento direto morre em cerca de 2 mil escritas: qualquer FTL com mapeamento já é centenas de vezes melhor.
+
+**Figuras sugeridas** (em `docs/img/`)
+- `resultados_fs_topo.png`: destaque, escritas até a falha e vida aproveitada.
+- `resultados_mapas_fs.png`: mapa de desgaste dos 128 blocos nos quatro modos.
+- `resultados_hist_fs.png` e `resultados_evolucao_fs.png`: distribuição e evolução do desgaste.
+- `resultados_mapas_quente.png`: mapa de desgaste no cenário de dados quentes.
+
+## Etapa 11: Correção do wear leveling estático, artigo final e apresentação
+
+**Correção do wear leveling estático (encontrada ao montar as figuras do artigo)**
+- Na curva de evolução do estático (uso de pendrive), o bloco mais gasto dava **saltos de mais de 100 ciclos**,
+  enquanto a média subia devagar. O primeiro bloco falhava com 84% da vida usada, e não perto de 100%.
+- Causa: o estático escolhia como "bloco frio" o bloco de menor P/E **mesmo que ele quase não tivesse páginas
+  válidas** (blocos que o GC nunca escolhia, porque no empate ele pega o de menor número). Copiar poucas páginas
+  para o bloco mais gasto deixava o resto dele livre; o GC logo apagava esse bloco de novo, e o estático o
+  escolhia outra vez. Resultado: o bloco mais gasto era justamente o mais apagado.
+- *Solução:* se o bloco frio tem pelo menos 3/4 de páginas válidas (48 de 64), ele continua indo para o bloco
+  mais gasto (migração clássica). Se tem menos, as poucas páginas válidas vão para o bloco ativo, como no GC, e o
+  bloco pouco gasto é apagado e volta para os livres; o bloco mais gasto continua livre. O GC e o estático passaram
+  a usar as mesmas funções (`copy_valid_pages()` e `erase_and_free()`).
+- Teste novo `test_static_nearly_empty_block` em `tests/test_wear_leveling.cpp` (6 verificações): monta a situação
+  com um bloco já gasto e confere os dois caminhos. Na versão antiga, 3 das 6 falham. `make test`: 202 verificações.
+
+| Uso de pendrive, WL dinâmico + estático | Antes da correção | Depois da correção |
+|---|---|---|
+| Escritas até a 1ª falha | 5.423.178 (6,2× sem WL) | **7.822.722 (8,9× sem WL)** |
+| Média / desvio padrão de P/E | 844,2 / 40,5 | 966,7 / **11,7** |
+| Menor P/E | 813 | **949** |
+| Vida aproveitada | 84,4% | **96,7%** |
+| Ações do estático (páginas copiadas) | 23.369 (62.440) | 22.409 (97.835) |
+| WA | 1,01 | 1,01 |
+
+- No cenário de dados quentes nada mudou (2.620.210 escritas, desvio 2,7): lá os blocos frios estão cheios de
+  dados válidos e a migração clássica já era o caminho usado.
+- Boa "dificuldade encontrada" para o artigo: o defeito só apareceu porque a tela de resultados mostra a curva do
+  bloco mais gasto, e não só o número final.
+
+**Artigo final**
+- Partiu do artigo da segunda entrega (modelo SBC, capa mantida, texto do primeiro artigo intocado, só C → C++).
+  Data da capa: 10 de novembro de 2026 (dia da apresentação).
+- Mudanças: Abstract e Resumo com os resultados finais; Tabela 1 com as etapas 6 a 11; novas seções 3.8 (wear
+  leveling, com o trecho de código da Figura 6), 3.9 (sistema de arquivos, Tabela 3), 3.10 (shell, Figura 7) e
+  3.11 (métricas e tela de resultados, Figura 8); as antigas 3.8 a 3.10 viraram 3.12 a 3.14 (testes: 202
+  verificações; decisões e dificuldades com as linhas novas, incluindo esta correção).
+- Seção 4 reescrita como **Resultados** (4.1 uso de pendrive com Tabela 6 e Figuras 10 a 12; 4.2 dados quentes
+  com Tabela 7 e Figura 13, e a nota sobre a mudança de 1.345.345 para 625.777 escritas desde a segunda entrega).
+- Seção 5 **Considerações finais**: objetivos atendidos, resposta ao problema de pesquisa, limitações e trabalhos
+  futuros. Referências mantidas. 23 páginas.
+- Arquivos: `PI_IV_2026_Artigo_Final.docx` e `.pdf` na pasta `artigo` do projeto (os da segunda entrega foram
+  mantidos).
+
+**Apresentação**
+- 18 slides com notas do apresentador: problema e pergunta de pesquisa, objetivos, arquitetura, as 12 etapas,
+  wear leveling dinâmico e estático, como os modos foram comparados, resultado principal (8,9×), escritas até a
+  falha, mapa de desgaste, evolução, dados quentes, a correção do estático, a tela de resultados, o shell,
+  dificuldades, conclusões e perguntas.
+- As figuras dos slides são recortes da própria tela de resultados (`docs/resultados.html`).
+
+**Estado final**
+- `make test`: 202 verificações em 9 programas, todas passando.
+- `./simulador --comparar` reproduz todos os números do artigo e dos slides (semente fixa).
