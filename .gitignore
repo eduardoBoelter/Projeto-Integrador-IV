@@ -9,3 +9,6 @@ simulador
 # Executáveis dos testes
 tests/*
 !tests/*.cpp
+
+# Resultados exportados pelos cenários
+*.csv
