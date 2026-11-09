@@ -161,6 +161,46 @@ static void test_static_threshold() {
           "paginas programadas = escritas logicas + copias do GC + copias do estatico");
 }
 
+// Correção da Etapa 11: um bloco pouco gasto mas quase sem dados válidos não
+// pode ser copiado para o bloco mais gasto (o fim do bloco ficaria livre, o GC
+// logo o apagaria de novo e o desgaste dele dispararia).
+static void test_static_nearly_empty_block() {
+    std::cout << "Wear leveling estatico: bloco frio quase vazio" << std::endl;
+    NANDFlashMemory flash(DATA, META);
+    flash.format();
+    IODriver driver(flash);
+    // Bloco 127 já gasto (60 ciclos): é o destino dos dados frios
+    for (int i = 0; i < 60; ++i) driver.erase_block(127);
+    WearLevelingFTL ftl(driver, true);
+    std::vector<uint8_t> buffer(PAGE_SIZE);
+
+    // Escritas 1 a 64: LBAs 0 a 63 enchem o bloco 0
+    for (uint32_t lba = 0; lba < 64; ++lba) ftl.write(lba, pattern(lba, 1).data());
+    // Escritas 65 a 128: regravam os LBAs 0 a 63 menos o 63. O bloco 0 fica com
+    // 1 página válida (LBA 63) e a verificação da escrita 128 age sobre ele.
+    for (uint32_t lba = 0; lba < 63; ++lba) ftl.write(lba, pattern(lba, 2).data());
+    ftl.write(0, pattern(0, 3).data());
+
+    PhysicalAddress pba{0, 0};
+    ftl.lookup(63, pba);
+    CHECK(driver.block_info(127).free_pages_count == PAGES_PER_BLOCK && pba.block != 127,
+          "o bloco quase vazio NAO vai para o bloco mais gasto (127 continua livre)");
+    CHECK(driver.block_info(0).pe_cycles == 1 && driver.block_info(0).valid_pages_count == 0,
+          "o bloco pouco gasto foi apagado e volta para os livres");
+    CHECK(ftl.read(63, buffer.data()) == FTLResult::OK && buffer == pattern(63, 1),
+          "a pagina valida que estava nele foi preservada");
+
+    // Escritas 129 a 192: o bloco 1 (63 paginas validas) passa a ser o mais frio
+    // e, por estar quase cheio, vai para o bloco mais gasto (migracao classica).
+    for (uint32_t lba = 100; lba < 164; ++lba) ftl.write(lba, pattern(lba, 1).data());
+    ftl.lookup(5, pba);
+    CHECK(pba.block == 127 && driver.block_info(127).valid_pages_count == 63,
+          "um bloco frio quase cheio vai para o bloco mais gasto");
+    CHECK(ftl.read(5, buffer.data()) == FTLResult::OK && buffer == pattern(5, 2), "dados migrados corretos");
+    CHECK(ftl.wl().static_migrations == 2 && ftl.wl().pages_moved == 64,
+          "2 acoes do estatico: 1 pagina recolocada + 63 paginas migradas");
+}
+
 static void test_reopen() {
     std::cout << "Reabrir o dispositivo com wear leveling" << std::endl;
     std::vector<uint32_t> version;
@@ -186,6 +226,7 @@ int main() {
     test_dynamic_choice();
     test_compare_modes();
     test_static_threshold();
+    test_static_nearly_empty_block();
     test_reopen();
 
     std::remove(DATA);

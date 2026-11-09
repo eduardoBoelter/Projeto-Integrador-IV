@@ -430,6 +430,8 @@ Interpretação para o texto:
 - Com arquivos realmente frios (60% do disco), o dinâmico quase não ajuda (+17%): os blocos das fotos nunca ficam livres.
 - O estático move essas fotos para blocos gastos e libera os blocos novos: **vida útil 6,2 vezes maior** que sem WL.
 - Esses números são revistos na Etapa 10, com as métricas completas.
+- *Atualização da Etapa 11:* a linha do estático tinha um defeito (ver "Correção do wear leveling estático" na
+  Etapa 11). Corrigido, o estático chega a 7.827.705 escritas lógicas até a falha (8,9 vezes o mapeamento sem WL).
 
 **Decisões técnicas**
 1. FAT com primeiro LBA livre (*first fit*), como o FAT real: os mesmos LBAs de dados são reutilizados.
@@ -502,12 +504,14 @@ Cenário do sistema de arquivos:
 | Direto | 2.013 | 15,9 | 122,5 | 7,71 | 0 | 1,6% | 59,18 |
 | Mapeamento sem WL | 874.122 | 106,3 | 265,5 | 2,50 | 0 | 10,6% | 1,00 |
 | WL dinâmico | 1.022.858 | 124,5 | 296,5 | 2,38 | 0 | 12,4% | 1,00 |
-| WL dinâmico + estático | 5.423.178 | 844,2 | 40,5 | 0,05 | 813 | 84,4% | 1,01 |
+| WL dinâmico + estático | 7.822.722 | 966,7 | 11,7 | 0,01 | 949 | 96,7% | 1,01 |
 
 - Os números do cenário quente batem com os da Etapa 7 (mesma semente), agora medidos pelo código comum.
 - No cenário do sistema de arquivos, a WA fica perto de 1: as edições regravam o arquivo inteiro e o FS
   libera os LBAs antigos, então o GC encontra blocos quase todos inválidos.
-- O estático custa pouco: 23.369 migrações em 5,4 milhões de escritas (WA de 1,00 para 1,01).
+- O estático custa pouco: 22.409 ações em 7,8 milhões de escritas (WA de 1,00 para 1,01).
+- *Linha do estático atualizada na Etapa 11*, depois da correção do defeito (antes: 5.423.178 escritas,
+  desvio 40,5, mínimo 813, 84,4% da vida).
 
 **Decisões técnicas**
 1. Métricas calculadas só a partir dos contadores P/E da NAND, que a camada física já mantinha desde a Etapa 2.
@@ -531,7 +535,8 @@ Cenário do sistema de arquivos:
 - `Report.hpp`: monta os resultados em JSON e grava a página; `ReportPage.hpp`: o modelo da página (HTML, CSS e
   JavaScript embutidos no executável). Passar o mouse mostra os valores de cada bloco e de cada ponto.
 - `docs/resultados.md`: tabelas, figuras e análise; `docs/resultados.html`: exemplo da página já gerada.
-- Novo teste `tests/test_report.cpp` (15 verificações). `make test`: 196 verificações, todas passando.
+- Novo teste `tests/test_report.cpp` (15 verificações). `make test`: 196 verificações, todas passando
+  (202 depois do teste novo da Etapa 11).
 
 **Decisões técnicas**
 1. Página HTML única, gerada pelo próprio programa em C++: roda em qualquer máquina com navegador, sem
@@ -546,8 +551,8 @@ Cenário do sistema de arquivos:
 
 | Carga | Sem WL | WL dinâmico | WL dinâmico + estático |
 |---|---|---|---|
-| Uso de pendrive: escritas até a falha | 874.122 | 1.022.858 (1,17×) | 5.423.178 (**6,2×**) |
-| Uso de pendrive: vida aproveitada | 10,6% | 12,4% | **84,4%** |
+| Uso de pendrive: escritas até a falha | 874.122 | 1.022.858 (1,17×) | 7.822.722 (**8,9×**) |
+| Uso de pendrive: vida aproveitada | 10,6% | 12,4% | **96,7%** |
 | Dados quentes: escritas até a falha | 625.777 | 2.601.162 (4,2×) | 2.620.210 (**4,2×**) |
 | Dados quentes: desvio padrão | 142,7 | 87,4 | **2,7** |
 
@@ -561,3 +566,33 @@ Cenário do sistema de arquivos:
 - `resultados_mapas_fs.png`: mapa de desgaste dos 128 blocos nos quatro modos.
 - `resultados_hist_fs.png` e `resultados_evolucao_fs.png`: distribuição e evolução do desgaste.
 - `resultados_mapas_quente.png`: mapa de desgaste no cenário de dados quentes.
+
+## Etapa 11: Correção do wear leveling estático, artigo final e apresentação
+
+**Correção do wear leveling estático (encontrada ao montar as figuras do artigo)**
+- Na curva de evolução do estático (uso de pendrive), o bloco mais gasto dava **saltos de mais de 100 ciclos**,
+  enquanto a média subia devagar. O primeiro bloco falhava com 84% da vida usada, e não perto de 100%.
+- Causa: o estático escolhia como "bloco frio" o bloco de menor P/E **mesmo que ele quase não tivesse páginas
+  válidas** (blocos que o GC nunca escolhia, porque no empate ele pega o de menor número). Copiar poucas páginas
+  para o bloco mais gasto deixava o resto dele livre; o GC logo apagava esse bloco de novo, e o estático o
+  escolhia outra vez. Resultado: o bloco mais gasto era justamente o mais apagado.
+- *Solução:* se o bloco frio tem pelo menos 3/4 de páginas válidas (48 de 64), ele continua indo para o bloco
+  mais gasto (migração clássica). Se tem menos, as poucas páginas válidas vão para o bloco ativo, como no GC, e o
+  bloco pouco gasto é apagado e volta para os livres; o bloco mais gasto continua livre. O GC e o estático passaram
+  a usar as mesmas funções (`copy_valid_pages()` e `erase_and_free()`).
+- Teste novo `test_static_nearly_empty_block` em `tests/test_wear_leveling.cpp` (6 verificações): monta a situação
+  com um bloco já gasto e confere os dois caminhos. Na versão antiga, 3 das 6 falham. `make test`: 202 verificações.
+
+| Uso de pendrive, WL dinâmico + estático | Antes da correção | Depois da correção |
+|---|---|---|
+| Escritas até a 1ª falha | 5.423.178 (6,2× sem WL) | **7.822.722 (8,9× sem WL)** |
+| Média / desvio padrão de P/E | 844,2 / 40,5 | 966,7 / **11,7** |
+| Menor P/E | 813 | **949** |
+| Vida aproveitada | 84,4% | **96,7%** |
+| Ações do estático (páginas copiadas) | 23.369 (62.440) | 22.409 (97.835) |
+| WA | 1,01 | 1,01 |
+
+- No cenário de dados quentes nada mudou (2.620.210 escritas, desvio 2,7): lá os blocos frios estão cheios de
+  dados válidos e a migração clássica já era o caminho usado.
+- Boa "dificuldade encontrada" para o artigo: o defeito só apareceu porque a tela de resultados mostra a curva do
+  bloco mais gasto, e não só o número final.

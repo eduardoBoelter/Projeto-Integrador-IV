@@ -298,36 +298,50 @@ protected:
         return victim;
     }
 
+    // Copia para o bloco ativo as páginas válidas de um bloco (as que a tabela
+    // ainda aponta). Retorna quantas copiou, ou -1 em caso de erro.
+    long copy_valid_pages(uint32_t block_id) {
+        std::vector<uint8_t> buffer(PAGE_SIZE);
+        long copied = 0;
+        for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
+            const Page& page = driver.block_info(block_id).pages[p];
+            if (page.state != PageState::VALID) continue;
+            uint32_t lba = page.logical_address;
+            // Cópia antiga que a tabela não aponta mais (por exemplo, num dispositivo
+            // usado antes por outro modo): não é copiada, será apagada com o bloco.
+            if (lba >= LOGICAL_PAGES || !mapped[lba] || l2p[lba].block != block_id || l2p[lba].page != p)
+                continue;
+            if (driver.read_page({block_id, p}, buffer.data()) != IOResult::OK) return -1;
+            if (append(lba, buffer.data(), false) != FTLResult::OK) return -1;
+            copied++;
+        }
+        return copied;
+    }
+
+    // Apaga um bloco cujos dados válidos já estão em outro lugar e o devolve à
+    // lista de livres. Se ele morrer neste apagamento, nenhum dado é perdido:
+    // só a capacidade diminui.
+    bool erase_and_free(uint32_t block_id) {
+        EraseResult erased = driver.erase_block(block_id);
+        note_erase(erased, block_id);
+        if (erased == EraseResult::OK) {
+            is_free[block_id] = true;
+            free_count++;
+        }
+        return erased == EraseResult::OK || erased == EraseResult::WORN_OUT;
+    }
+
     // Uma rodada de garbage collection. Retorna false se não há o que coletar.
     bool collect_garbage() {
         uint32_t victim = select_victim();
         if (victim == NO_BLOCK) return false;
-
         // 1. Copia as páginas ainda válidas da vítima para o bloco ativo
-        std::vector<uint8_t> buffer(PAGE_SIZE);
-        for (uint32_t p = 0; p < PAGES_PER_BLOCK; ++p) {
-            const Page& page = driver.block_info(victim).pages[p];
-            if (page.state != PageState::VALID) continue;
-            uint32_t lba = page.logical_address;
-            // Cópia antiga que a tabela não aponta mais (por exemplo, num dispositivo
-            // usado antes por outro modo): não é copiada, será apagada com a vítima.
-            if (lba >= LOGICAL_PAGES || !mapped[lba] || l2p[lba].block != victim || l2p[lba].page != p)
-                continue;
-            if (driver.read_page({victim, p}, buffer.data()) != IOResult::OK) return false;
-            if (append(lba, buffer.data(), false) != FTLResult::OK) return false;
-            gc_stats.pages_copied++;
-        }
-
-        // 2. Apaga a vítima. Se ela morrer neste apagamento, os dados já
-        //    estão a salvo em outro bloco: só a capacidade diminui.
-        EraseResult erased = driver.erase_block(victim);
-        note_erase(erased, victim);
+        long copied = copy_valid_pages(victim);
+        if (copied < 0) return false;
+        gc_stats.pages_copied += static_cast<uint64_t>(copied);
         gc_stats.runs++;
-        if (erased == EraseResult::OK) {
-            is_free[victim] = true;
-            free_count++;
-        }
-        return erased == EraseResult::OK || erased == EraseResult::WORN_OUT;
+        // 2. Apaga a vítima
+        return erase_and_free(victim);
     }
 
 protected:
@@ -413,6 +427,9 @@ public:
     // A verificação do estático é feita a cada N escritas lógicas (é barata,
     // mas não precisa ser feita sempre)
     static constexpr uint32_t STATIC_WL_CHECK_INTERVAL = 64;
+    // Só blocos com pelo menos 3/4 de páginas válidas vão para o bloco gasto;
+    // os outros têm as poucas páginas válidas copiadas para o bloco ativo
+    static constexpr size_t MIN_COLD_VALID_PAGES = PAGES_PER_BLOCK * 3 / 4;
 
 private:
     bool use_static;
@@ -464,14 +481,8 @@ private:
             wl_stats.pages_moved++;
         }
 
-        EraseResult erased = driver.erase_block(source);
-        note_erase(erased, source);
-        if (erased == EraseResult::OK) {
-            is_free[source] = true;
-            free_count++;
-        }
         wl_stats.static_migrations++;
-        return erased == EraseResult::OK || erased == EraseResult::WORN_OUT;
+        return erase_and_free(source);
     }
 
     void check_static_wear_leveling() {
@@ -484,7 +495,21 @@ private:
         uint32_t cold_pe = driver.block_info(source).pe_cycles;
         uint32_t hot_pe = driver.block_info(target).pe_cycles;
         if (hot_pe <= cold_pe || hot_pe - cold_pe <= STATIC_WL_THRESHOLD) return;
-        migrate_cold_block(source, target);
+        if (driver.block_info(source).valid_pages_count >= MIN_COLD_VALID_PAGES) {
+            // Dados frios de verdade: vão para o bloco mais gasto, que quase não
+            // será apagado de novo
+            migrate_cold_block(source, target);
+        } else {
+            // Bloco pouco gasto, mas quase sem dados válidos. Copiar para o bloco
+            // gasto deixaria o fim dele livre, a coleta de lixo logo o apagaria de
+            // novo e ele seria escolhido outra vez. As poucas páginas vão para o
+            // bloco ativo, como no GC, e o bloco pouco gasto volta para os livres.
+            long copied = copy_valid_pages(source);
+            if (copied < 0) return;
+            wl_stats.pages_moved += static_cast<uint64_t>(copied);
+            wl_stats.static_migrations++;
+            erase_and_free(source);
+        }
     }
 
 protected:
