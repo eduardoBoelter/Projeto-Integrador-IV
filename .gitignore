@@ -15,3 +15,6 @@ tests/*
 
 # Modo da FTL escolhido no shell
 nand_config.txt
+
+# Tela de resultados gerada por --comparar (o exemplo fica em docs/)
+/resultados.html

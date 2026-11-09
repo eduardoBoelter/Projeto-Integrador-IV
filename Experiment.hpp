@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 #include "Metrics.hpp"
-#include "Shell.hpp"
+#include "Workload.hpp"
 
 // ---------------------------------------------------------------------------
 // Etapa 9: experimentos com coleta de métricas.
@@ -47,6 +47,7 @@ struct ExperimentResult {
     uint64_t wl_migrations = 0, wl_pages = 0;
     WearSummary wear;
     std::vector<uint32_t> pe;
+    std::vector<uint32_t> bad_blocks; // blocos que viraram bad block
     std::vector<WearSample> timeline;
     double seconds = 0;
 };
@@ -141,6 +142,8 @@ public:
             r.wl_pages = wl->wl().pages_moved;
         }
         r.pe = pe_counts(driver);
+        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b)
+            if (driver.block_info(b).is_bad_block) r.bad_blocks.push_back(b);
         r.wear = summarize(driver);
         r.timeline = timeline.points();
         r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

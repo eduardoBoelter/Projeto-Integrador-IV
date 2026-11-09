@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include "Metrics.hpp"
+#include "Report.hpp"
 #include "Workload.hpp"
 
 // ---------------------------------------------------------------------------
@@ -23,36 +24,6 @@
 // Os comandos podem vir do teclado ou de um arquivo:
 //     ./simulador < comandos.txt
 // ---------------------------------------------------------------------------
-
-// Modos da FTL que o shell conhece
-enum class FTLMode { DIRECT, MAPPING, WL_DYNAMIC, WL_STATIC };
-
-inline const char* mode_key(FTLMode mode) {
-    switch (mode) {
-        case FTLMode::DIRECT:     return "direto";
-        case FTLMode::MAPPING:    return "mapeamento";
-        case FTLMode::WL_DYNAMIC: return "dinamico";
-        case FTLMode::WL_STATIC:  return "estatico";
-    }
-    return "?";
-}
-
-inline bool parse_mode(const std::string& text, FTLMode& mode) {
-    for (FTLMode m : {FTLMode::DIRECT, FTLMode::MAPPING, FTLMode::WL_DYNAMIC, FTLMode::WL_STATIC}) {
-        if (text == mode_key(m)) { mode = m; return true; }
-    }
-    return false;
-}
-
-inline std::unique_ptr<FTL> make_ftl(FTLMode mode, IODriver& driver) {
-    switch (mode) {
-        case FTLMode::DIRECT:     return std::make_unique<DirectFTL>(driver);
-        case FTLMode::MAPPING:    return std::make_unique<PageMappingFTL>(driver);
-        case FTLMode::WL_DYNAMIC: return std::make_unique<WearLevelingFTL>(driver, false);
-        case FTLMode::WL_STATIC:  return std::make_unique<WearLevelingFTL>(driver, true);
-    }
-    return nullptr;
-}
 
 class Shell {
 private:
@@ -117,6 +88,7 @@ private:
             << "  estatisticas           escritas, amplificacao, GC e resumo do desgaste\n"
             << "  desgaste               ciclos P/E de cada um dos 128 blocos\n"
             << "  exportar <arquivo.csv> exporta os ciclos P/E dos blocos em CSV\n"
+            << "  comparar               roda os experimentos nos quatro modos e abre a tela de resultados\n"
             << "  ajuda                  mostra esta lista\n"
             << "  sair                   salva e encerra" << std::endl;
     }
@@ -273,6 +245,10 @@ public:
             cmd_wear(out);
         } else if (cmd == "exportar" && in >> name) {
             cmd_export(name, out);
+        } else if (cmd == "comparar") {
+            out << "Rodando as duas cargas nos quatro modos ate a primeira falha (leva alguns minutos)." << std::endl
+                << "Os experimentos usam um dispositivo proprio: o pendrive do shell nao muda." << std::endl;
+            run_comparison({WorkloadKind::FILESYSTEM, WorkloadKind::HOT}, "comando comparar do shell", true, out);
         } else {
             out << "Comando desconhecido ou incompleto: '" << line << "'. Digite 'ajuda'." << std::endl;
             return true;

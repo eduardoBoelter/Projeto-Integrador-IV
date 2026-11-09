@@ -12,16 +12,19 @@
 #include "IODriver.hpp"
 #include "FTL.hpp"
 #include "Shell.hpp"
-#include "Experiment.hpp"
+#include "Report.hpp"
 
 // Uso:
 //   ./simulador                    shell interativo sobre o pendrive simulado (Etapa 8):
 //                                  nand_device.bin, nand_meta.bin e nand_config.txt
 //   ./simulador < comandos.txt     o mesmo shell, lendo os comandos de um arquivo
 //   ./simulador --demo             demonstração da FTL com mapeamento (arquivos próprios)
-//   ./simulador --cenario-quente   carga de dados quentes até a 1ª falha nos quatro modos
-//   ./simulador --cenario-fs       carga do sistema de arquivos até a 1ª falha nos quatro modos
-//                                  (os cenários usam arquivos próprios e exportam CSVs)
+//   ./simulador --comparar         roda as duas cargas até a 1ª falha nos quatro modos da FTL,
+//                                  exporta os CSVs e abre a tela de resultados (resultados.html)
+//   ./simulador --cenario-quente   só a carga de dados quentes
+//   ./simulador --cenario-fs       só a carga do sistema de arquivos
+//   Acrescente --sem-abrir para gravar resultados.html sem abrir o navegador.
+//   Os experimentos usam arquivos próprios e não mexem no dispositivo do shell.
 
 // Abre o dispositivo existente ou formata um novo
 static bool open_or_format(NANDFlashMemory& flash, bool force_format) {
@@ -92,26 +95,21 @@ static int run_demo(bool force_format) {
     return 0;
 }
 
-// Etapa 9: roda uma carga nos quatro modos, mostra a tabela e exporta os CSVs
-static int run_scenario(WorkloadKind workload) {
-    std::cout << "=== Cenario: " << workload_title(workload) << " (ate a primeira falha de bloco) ===" << std::endl;
-    std::vector<ExperimentResult> results = run_all_modes(workload, std::cout);
-    std::cout << std::endl;
-    print_comparison(results, std::cout);
-    export_results(results, std::string(workload_key(workload)) + "_", std::cout);
-    return 0;
-}
-
 int main(int argc, char* argv[]) {
     const std::string option = argc > 1 ? argv[1] : "";
-    if (option == "--cenario-quente") return run_scenario(WorkloadKind::HOT);
-    if (option == "--cenario-fs") return run_scenario(WorkloadKind::FILESYSTEM);
+    const bool open = !(argc > 2 && std::string(argv[2]) == "--sem-abrir");
+    if (option == "--comparar")
+        return run_comparison({WorkloadKind::FILESYSTEM, WorkloadKind::HOT}, "./simulador --comparar", open, std::cout);
+    if (option == "--cenario-fs")
+        return run_comparison({WorkloadKind::FILESYSTEM}, "./simulador --cenario-fs", open, std::cout);
+    if (option == "--cenario-quente")
+        return run_comparison({WorkloadKind::HOT}, "./simulador --cenario-quente", open, std::cout);
     if (option == "--demo") {
         std::cout << "=== Simulador de Memoria NAND Flash ===" << std::endl;
         return run_demo(true);
     }
     if (!option.empty()) {
-        std::cerr << "Opcao desconhecida: " << option << "\nUse: ./simulador [--demo | --cenario-quente | --cenario-fs]" << std::endl;
+        std::cerr << "Opcao desconhecida: " << option << "\nUse: ./simulador [--demo | --comparar | --cenario-fs | --cenario-quente] [--sem-abrir]" << std::endl;
         return 1;
     }
 

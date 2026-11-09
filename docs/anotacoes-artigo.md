@@ -513,3 +513,51 @@ Cenário do sistema de arquivos:
 1. Métricas calculadas só a partir dos contadores P/E da NAND, que a camada física já mantinha desde a Etapa 2.
 2. Amostragem com intervalo que dobra, para a curva de evolução ter tamanho parecido em todos os modos.
 3. Cada experimento usa arquivos próprios e os apaga no fim, para não estragar o pendrive do shell.
+
+## Etapa 10: Testes comparativos, gráficos e tela de resultados (concluída)
+
+**O que foi feito**
+- `./simulador --comparar` roda as duas cargas (uso de pendrive e dados quentes) nos quatro modos da FTL,
+  sempre com a mesma sequência de escritas, até a primeira falha de bloco. Mostra as tabelas no terminal,
+  exporta os CSVs e grava a **tela de resultados** `resultados.html`, que abre sozinha no navegador.
+  No shell, o comando `comparar` faz o mesmo. Leva cerca de 2 minutos.
+- A tela de resultados atende à crítica da segunda entrega (o projeto era só terminal). Ela mostra:
+  - destaque: quantas vezes mais escritas o wear leveling estático aguentou que o mapeamento sem WL;
+  - escritas até a primeira falha (barras) e vida aproveitada dos blocos (medidores);
+  - mapa de desgaste dos 128 blocos em cada modo (o bloco que falhou aparece com ✕);
+  - histograma dos ciclos P/E (faixas de 100 ciclos);
+  - evolução do bloco mais gasto e da média ao longo das escritas até a falha;
+  - tabela com todas as métricas e um glossário ("Como ler esta página").
+- `Report.hpp`: monta os resultados em JSON e grava a página; `ReportPage.hpp`: o modelo da página (HTML, CSS e
+  JavaScript embutidos no executável). Passar o mouse mostra os valores de cada bloco e de cada ponto.
+- `docs/resultados.md`: tabelas, figuras e análise; `docs/resultados.html`: exemplo da página já gerada.
+- Novo teste `tests/test_report.cpp` (15 verificações). `make test`: 196 verificações, todas passando.
+
+**Decisões técnicas**
+1. Página HTML única, gerada pelo próprio programa em C++: roda em qualquer máquina com navegador, sem
+   instalar biblioteca gráfica, sem internet e sem mudar a compilação (`g++ main.cpp` continua igual).
+2. Os dados entram na página como JSON e os gráficos são desenhados em SVG pelo navegador, na largura da tela
+   (funciona no computador e no celular, com tema claro ou escuro).
+3. Uma cor por função: azul para o desgaste (mapa do mais claro ao mais escuro), laranja para o bloco mais
+   gasto, vermelho com ✕ só para bad block. Os números estão sempre escritos, não só na cor.
+4. O texto que vai para dentro do JSON é escapado (inclusive `<`), para nenhum nome quebrar a página.
+
+**Resultado principal (para a seção de Resultados do artigo)**
+
+| Carga | Sem WL | WL dinâmico | WL dinâmico + estático |
+|---|---|---|---|
+| Uso de pendrive: escritas até a falha | 874.122 | 1.022.858 (1,17×) | 5.423.178 (**6,2×**) |
+| Uso de pendrive: vida aproveitada | 10,6% | 12,4% | **84,4%** |
+| Dados quentes: escritas até a falha | 625.777 | 2.601.162 (4,2×) | 2.620.210 (**4,2×**) |
+| Dados quentes: desvio padrão | 142,7 | 87,4 | **2,7** |
+
+- O dinâmico basta quando todos os dados mudam de vez em quando; com dados frios de verdade (fotos e músicas),
+  só o estático aproveita os blocos que guardam esses dados.
+- O custo do estático é de cerca de 1% de escritas extras (WA de 1,00 para 1,01 no uso de pendrive).
+- O mapeamento direto morre em cerca de 2 mil escritas: qualquer FTL com mapeamento já é centenas de vezes melhor.
+
+**Figuras sugeridas** (em `docs/img/`)
+- `resultados_fs_topo.png`: destaque, escritas até a falha e vida aproveitada.
+- `resultados_mapas_fs.png`: mapa de desgaste dos 128 blocos nos quatro modos.
+- `resultados_hist_fs.png` e `resultados_evolucao_fs.png`: distribuição e evolução do desgaste.
+- `resultados_mapas_quente.png`: mapa de desgaste no cenário de dados quentes.

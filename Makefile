@@ -2,8 +2,8 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2
 
 TARGET  = simulador
-HEADERS = NANDFlash.hpp IODriver.hpp FTL.hpp SimpleFS.hpp Workload.hpp Shell.hpp Metrics.hpp Experiment.hpp
-TESTS   = tests/test_nand tests/test_driver tests/test_ftl_direct tests/test_ftl_mapping tests/test_wear_leveling tests/test_fs tests/test_shell tests/test_metrics
+HEADERS = NANDFlash.hpp IODriver.hpp FTL.hpp SimpleFS.hpp Workload.hpp Shell.hpp Metrics.hpp Experiment.hpp Report.hpp ReportPage.hpp
+TESTS   = tests/test_nand tests/test_driver tests/test_ftl_direct tests/test_ftl_mapping tests/test_wear_leveling tests/test_fs tests/test_shell tests/test_metrics tests/test_report
 
 all: $(TARGET)
 
@@ -23,6 +23,7 @@ test: $(TESTS)
 	./tests/test_fs
 	./tests/test_shell
 	./tests/test_metrics
+	./tests/test_report
 
 tests/test_nand: tests/test_nand.cpp NANDFlash.hpp
 	$(CXX) $(CXXFLAGS) tests/test_nand.cpp -o tests/test_nand
@@ -48,7 +49,10 @@ tests/test_shell: tests/test_shell.cpp $(HEADERS)
 tests/test_metrics: tests/test_metrics.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) tests/test_metrics.cpp -o tests/test_metrics
 
+tests/test_report: tests/test_report.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) tests/test_report.cpp -o tests/test_report
+
 clean:
-	rm -f $(TARGET) $(TARGET).exe $(TESTS) tests/*.exe *.o *.bin *.csv nand_config.txt
+	rm -f $(TARGET) $(TARGET).exe $(TESTS) tests/*.exe *.o *.bin *.csv nand_config.txt resultados.html
 
 .PHONY: all run test clean

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <vector>
 #include "IODriver.hpp"
 
@@ -524,4 +526,36 @@ inline const char* to_string(FTLResult result) {
         case FTLResult::IO_ERROR:        return "IO_ERROR";
     }
     return "?";
+}
+
+// ---------------------------------------------------------------------------
+// Modos da FTL (Etapa 8): usados pelo shell e pelos experimentos.
+// ---------------------------------------------------------------------------
+enum class FTLMode { DIRECT, MAPPING, WL_DYNAMIC, WL_STATIC };
+
+inline const char* mode_key(FTLMode mode) {
+    switch (mode) {
+        case FTLMode::DIRECT:     return "direto";
+        case FTLMode::MAPPING:    return "mapeamento";
+        case FTLMode::WL_DYNAMIC: return "dinamico";
+        case FTLMode::WL_STATIC:  return "estatico";
+    }
+    return "?";
+}
+
+inline bool parse_mode(const std::string& text, FTLMode& mode) {
+    for (FTLMode m : {FTLMode::DIRECT, FTLMode::MAPPING, FTLMode::WL_DYNAMIC, FTLMode::WL_STATIC}) {
+        if (text == mode_key(m)) { mode = m; return true; }
+    }
+    return false;
+}
+
+inline std::unique_ptr<FTL> make_ftl(FTLMode mode, IODriver& driver) {
+    switch (mode) {
+        case FTLMode::DIRECT:     return std::make_unique<DirectFTL>(driver);
+        case FTLMode::MAPPING:    return std::make_unique<PageMappingFTL>(driver);
+        case FTLMode::WL_DYNAMIC: return std::make_unique<WearLevelingFTL>(driver, false);
+        case FTLMode::WL_STATIC:  return std::make_unique<WearLevelingFTL>(driver, true);
+    }
+    return nullptr;
 }
