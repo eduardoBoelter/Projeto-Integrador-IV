@@ -435,3 +435,24 @@ Interpretação para o texto:
 1. FAT com primeiro LBA livre (*first fit*), como o FAT real: os mesmos LBAs de dados são reutilizados.
 2. Diretório de uma única página e FAT de 8 páginas, para concentrar os metadados em 10 LBAs.
 3. O gerador de carga tem semente fixa e usa só a interface do SimpleFS, então roda igual nos quatro modos.
+
+## Etapa 8: Shell interativo (concluída)
+
+**O que foi feito**
+- `Shell.hpp`: shell de comandos sobre o pendrive simulado. `./simulador` sem opções abre o shell.
+- Comandos: `formatar <modo>`, `modo`, `ls`, `criar`, `escrever`, `ler`, `apagar`, `carga <n>`, `estatisticas`,
+  `desgaste` (mapa 16 × 8 com os ciclos P/E de cada bloco), `ajuda` e `sair`.
+- O modo da FTL é escolhido na formatação e salvo em `nand_config.txt`: cada modo organiza os dados de um jeito,
+  então trocar de modo exige formatar.
+- O desgaste é salvo depois de cada comando, então fechar o programa não perde nada.
+- Aceita roteiros: `./simulador < comandos.txt`, útil para a apresentação.
+- A demonstração antiga virou `./simulador --demo` e usa arquivos próprios.
+- Novo teste `tests/test_shell.cpp` (14 verificações), que roda três sessões seguidas e confere a saída.
+
+**Decisões técnicas**
+1. Comandos em português e sem acentos na saída, para aparecer certo no CMD do Windows.
+2. O shell só conhece a interface de cada camada (`SimpleFS`, `FTL`, `IODriver`), sem acessar os blocos por fora.
+3. O `carga <n>` reaproveita o gerador da Etapa 7; se o disco estiver quase vazio, copia antes as fotos e músicas.
+
+**Figura sugerida**
+- Tela do shell: `formatar estatico`, `escrever`, `ler`, `carga 500`, `estatisticas` e `desgaste`.

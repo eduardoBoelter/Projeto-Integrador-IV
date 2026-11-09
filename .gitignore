@@ -12,3 +12,6 @@ tests/*
 
 # Resultados exportados pelos cenários
 *.csv
+
+# Modo da FTL escolhido no shell
+nand_config.txt

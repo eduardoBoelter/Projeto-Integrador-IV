@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <random>
 #include <string>
 #include <vector>
@@ -65,7 +67,19 @@ public:
     // Arquivos frios ocupam até esta fração do disco na preparação
     static constexpr double COLD_FRACTION = 0.6;
 
-    FSWorkload(SimpleFS& file_system, uint32_t seed = 2026) : fs(file_system), rng(seed) {}
+    // Documentos que já existem no disco (de uma sessão anterior) continuam
+    // sendo editados, e os nomes novos não repetem os antigos.
+    FSWorkload(SimpleFS& file_system, uint32_t seed = 2026) : fs(file_system), rng(seed) {
+        for (const FileInfo& f : fs.list()) {
+            if (f.name.rfind("trabalho_", 0) != 0) continue;
+            docs.push_back(f.name);
+            uint32_t n = static_cast<uint32_t>(std::strtoul(f.name.c_str() + 9, nullptr, 10));
+            next_doc = std::max(next_doc, n + 1);
+        }
+    }
+
+    // A preparação só faz sentido com o disco quase vazio
+    bool needs_preparation() const { return fs.free_pages() > FS_DATA_LBAS / 2; }
 
     // Fase 1: arquivos grandes que não mudam mais (dados frios)
     FSResult prepare() {

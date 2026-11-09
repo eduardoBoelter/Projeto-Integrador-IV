@@ -11,10 +11,13 @@
 #include "NANDFlash.hpp"
 #include "IODriver.hpp"
 #include "FTL.hpp"
+#include "Shell.hpp"
 
 // Uso:
-//   ./simulador                    demonstração da FTL com mapeamento no dispositivo do usuário
-//   ./simulador --format           formata o dispositivo antes da demonstração
+//   ./simulador                    shell interativo sobre o pendrive simulado (Etapa 8):
+//                                  nand_device.bin, nand_meta.bin e nand_config.txt
+//   ./simulador < comandos.txt     o mesmo shell, lendo os comandos de um arquivo
+//   ./simulador --demo             demonstração da FTL com mapeamento (arquivos próprios)
 //   ./simulador --cenario-quente   roda o cenário de dados quentes até a 1ª falha nos quatro
 //                                  modos da FTL e compara os resultados
 //                                  (usa arquivos próprios, não mexe no dispositivo)
@@ -54,7 +57,7 @@ static std::string pba_text(const PageMappingFTL& ftl, uint32_t lba) {
 // Demonstração: grava e altera o LBA 0 pela FTL com mapeamento de páginas.
 // Cada alteração vai para uma página nova; nenhuma apaga bloco.
 static int run_demo(bool force_format) {
-    NANDFlashMemory flash("nand_device.bin", "nand_meta.bin");
+    NANDFlashMemory flash("demo_device.bin", "demo_meta.bin");
     if (!open_or_format(flash, force_format)) return 1;
 
     IODriver driver(flash);
@@ -240,7 +243,17 @@ static int run_comparison() {
 int main(int argc, char* argv[]) {
     const std::string option = argc > 1 ? argv[1] : "";
     if (option == "--cenario-quente") return run_comparison();
+    if (option == "--demo") {
+        std::cout << "=== Simulador de Memoria NAND Flash ===" << std::endl;
+        return run_demo(true);
+    }
+    if (!option.empty()) {
+        std::cerr << "Opcao desconhecida: " << option << "\nUse: ./simulador [--demo | --cenario-quente]" << std::endl;
+        return 1;
+    }
 
-    std::cout << "=== Simulador de Memoria NAND Flash ===" << std::endl;
-    return run_demo(option == "--format");
+    std::cout << "=== Simulador de pendrive com memoria NAND Flash ===" << std::endl;
+    Shell shell;
+    shell.run(std::cin, std::cout);
+    return 0;
 }
