@@ -259,7 +259,11 @@ protected:
                 // Libera espaço antes de consumir mais um bloco livre
                 while (free_count < GC_MIN_FREE_BLOCKS && collect_garbage()) {}
             }
-            if (!open_new_active_block()) return FTLResult::DEVICE_WORN_OUT;
+            // O próprio GC pode ter aberto um bloco ativo novo ao copiar as páginas
+            // válidas; nesse caso ele ainda tem páginas livres e deve ser usado.
+            if (active_block == NO_BLOCK || next_page >= PAGES_PER_BLOCK) {
+                if (!open_new_active_block()) return FTLResult::DEVICE_WORN_OUT;
+            }
         }
 
         PhysicalAddress target{active_block, next_page++};
@@ -273,17 +277,19 @@ protected:
         return FTLResult::OK;
     }
 
-    // Escolha da vítima: política gulosa (greedy), o bloco com mais páginas
-    // inválidas, pois é o que libera mais espaço copiando menos.
+    // Escolha da vítima: política gulosa (greedy), o bloco que libera mais
+    // espaço copiando menos, ou seja, com mais páginas NÃO válidas (inválidas,
+    // ou livres que sobraram num bloco que não é mais o ativo).
     uint32_t select_victim() const {
         uint32_t victim = NO_BLOCK;
-        size_t most_invalid = 0;
+        size_t most_reclaimable = 0;
         for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
             if (is_free[b] || b == active_block) continue;
             const NANDBlock& block = driver.block_info(b);
             if (block.is_bad_block) continue;
-            if (block.invalid_pages_count > most_invalid) {
-                most_invalid = block.invalid_pages_count;
+            size_t reclaimable = block.invalid_pages_count + block.free_pages_count;
+            if (reclaimable > most_reclaimable) {
+                most_reclaimable = reclaimable;
                 victim = b;
             }
         }

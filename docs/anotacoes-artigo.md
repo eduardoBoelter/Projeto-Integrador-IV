@@ -360,22 +360,21 @@ shell interativo (8), métricas completas (9), bateria de testes comparativos co
 
 **Resultados do cenário de dados quentes (até a primeira falha de bloco)**
 
+Valores **depois da correção feita na Etapa 7** (ver "Correção da Etapa 5" abaixo):
+
 | Modo | Escritas na fase 2 | Média P/E | Desvio padrão | CV | Amplificação |
 |---|---|---|---|---|---|
 | Direto | 1.132 | 8,84 | 87,96 | 9,95 | 63,94 |
-| Mapeamento sem WL | 1.345.345 | 564,59 | 163,67 | 0,29 | 3,40 |
-| WL dinâmico | 1.736.001 | 737,01 | 74,73 | 0,10 | 3,44 |
-| WL dinâmico + estático | 2.069.377 | 923,25 | 19,86 | 0,02 | 3,61 |
+| Mapeamento sem WL | 625.777 | 236,04 | 142,72 | 0,60 | 3,09 |
+| WL dinâmico | 2.601.162 | 984,34 | 87,38 | 0,09 | 3,10 |
+| WL dinâmico + estático | 2.620.210 | 991,68 | 2,74 | 0,00 | 3,10 |
 
 Interpretação para o texto:
-- O dinâmico sozinho aumentou a vida útil em 29% em relação ao mapeamento sem WL; com o estático, o ganho foi de 54%
-  (2.069.377 ÷ 1.345.345 = 1,54). Em relação ao mapeamento direto, são cerca de 1.828 vezes mais escritas.
-- Quando o primeiro bloco falhou no modo estático, a média já era de 923 ciclos: **92% da vida de todos os blocos foi
-  aproveitada**, contra 56% sem wear leveling.
-- O dinâmico sozinho não basta: com o disco cheio, quase não há blocos livres para escolher, e o GC sempre libera
-  os mesmos blocos (os de dados quentes). Os blocos com dados frios ficam parados. É exatamente o problema que o
-  estático resolve.
-- O custo do estático aparece na amplificação de escrita, que sobe pouco (3,44 → 3,61) por causa das cópias de dados frios.
+- Neste cenário sintético, 10% das escritas caem em LBAs aleatórios: quase todo bloco acaba tendo páginas inválidas
+  e passa pelo GC. Por isso o dinâmico sozinho já espalha bem o desgaste (vida 4,2 vezes maior que sem WL).
+- O estático quase não muda a vida útil aqui (+0,7%), mas zera a diferença entre blocos: desvio de 87,38 para 2,74.
+  No dinâmico ainda sobra 1 bloco nunca apagado (dados que nunca mudaram).
+- O efeito do estático aparece de verdade na carga do sistema de arquivos (Etapa 7), onde há arquivos realmente frios.
 
 **Decisões técnicas**
 1. Wear leveling como **subclasse**: os modos comparados compartilham o mesmo código de mapeamento e GC, então a diferença
@@ -392,3 +391,47 @@ Interpretação para o texto:
 **Figuras sugeridas**
 - Gráfico de barras do desgaste por bloco nos quatro modos (`desgaste_<modo>.csv`).
 - Trecho de código: `check_static_wear_leveling()` e `select_free_block()` da `WearLevelingFTL`.
+
+## Etapa 7: Sistema de arquivos mínimo e gerador de carga (concluída)
+
+**O que foi feito**
+- `SimpleFS.hpp`: sistema de arquivos no estilo FAT, só com o necessário para gerar a carga de um pendrive.
+  - LBA 0: superbloco (assinatura, espaço livre, número de arquivos, contador de operações).
+  - LBAs 1 a 8: tabela de alocação (FAT), 2 bytes por LBA de dados.
+  - LBA 9: diretório com até 32 arquivos (64 bytes por entrada).
+  - LBAs 10 a 7679: área de dados (7.670 LBAs, cerca de 15 MB).
+  - Operações: `format`, `mount`, `create`, `write_file`, `read_file`, `remove`, `list`.
+  - **Toda operação regrava o superbloco, o diretório e as páginas da FAT que mudaram**: são os dados quentes.
+- `Workload.hpp`: gerador de carga que imita o uso de um pendrive.
+  - Preparação: arquivos grandes ("fotos" e "músicas", 256 a 900 KB) até ocupar 60% do disco. Nunca mudam (dados frios).
+  - Uso: 70% editar um documento (2 a 16 KB), 20% criar um documento, 10% apagar. Semente fixa.
+- Novo teste `tests/test_fs.cpp` (29 verificações).
+
+**Correção da Etapa 5 encontrada nesta etapa**
+- Ao medir a carga do sistema de arquivos, apareceram blocos parcialmente gravados que não eram o bloco ativo.
+  Causa: quando o GC rodava, ele podia abrir um bloco ativo novo para copiar as páginas válidas, e logo depois a
+  escrita abria **outro** bloco, abandonando as páginas livres do primeiro.
+  *Solução:* a escrita só abre bloco novo se o bloco ativo ainda estiver cheio depois do GC.
+- O GC também passou a contar as páginas livres que sobraram num bloco que não é o ativo como espaço recuperável
+  (necessário depois das migrações do wear leveling estático, que podem deixar o fim do bloco livre).
+- Com a correção, os números do mapeamento sem WL mudaram (1.345.345 → 625.777 escritas no cenário de dados quentes).
+  **Os resultados da segunda entrega usavam a versão com o defeito**; os da entrega final usam a versão corrigida.
+  Boa "dificuldade encontrada" para o artigo: o defeito só apareceu porque a nova carga foi medida bloco a bloco.
+
+**Primeira medição com a carga do sistema de arquivos (até a primeira falha)**
+
+| Modo | Escritas lógicas até a falha | Média P/E | Desvio padrão |
+|---|---|---|---|
+| Direto | 6.996 | 15,9 | 122,5 |
+| Mapeamento sem WL | 879.105 | 106,3 | 265,5 |
+| WL dinâmico | 1.027.841 | 124,5 | 296,5 |
+| WL dinâmico + estático | 5.428.161 | 844,2 | 40,5 |
+
+- Com arquivos realmente frios (60% do disco), o dinâmico quase não ajuda (+17%): os blocos das fotos nunca ficam livres.
+- O estático move essas fotos para blocos gastos e libera os blocos novos: **vida útil 6,2 vezes maior** que sem WL.
+- Esses números são revistos na Etapa 10, com as métricas completas.
+
+**Decisões técnicas**
+1. FAT com primeiro LBA livre (*first fit*), como o FAT real: os mesmos LBAs de dados são reutilizados.
+2. Diretório de uma única página e FAT de 8 páginas, para concentrar os metadados em 10 LBAs.
+3. O gerador de carga tem semente fixa e usa só a interface do SimpleFS, então roda igual nos quatro modos.
