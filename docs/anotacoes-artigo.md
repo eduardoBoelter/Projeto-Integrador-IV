@@ -596,3 +596,28 @@ Cenário do sistema de arquivos:
   dados válidos e a migração clássica já era o caminho usado.
 - Boa "dificuldade encontrada" para o artigo: o defeito só apareceu porque a tela de resultados mostra a curva do
   bloco mais gasto, e não só o número final.
+
+**Artigo final**
+- Partiu do artigo da segunda entrega (modelo SBC, capa mantida, texto do primeiro artigo intocado, só C → C++).
+  Data da capa: 10 de novembro de 2026 (dia da apresentação).
+- Mudanças: Abstract e Resumo com os resultados finais; Tabela 1 com as etapas 6 a 11; novas seções 3.8 (wear
+  leveling, com o trecho de código da Figura 6), 3.9 (sistema de arquivos, Tabela 3), 3.10 (shell, Figura 7) e
+  3.11 (métricas e tela de resultados, Figura 8); as antigas 3.8 a 3.10 viraram 3.12 a 3.14 (testes: 202
+  verificações; decisões e dificuldades com as linhas novas, incluindo esta correção).
+- Seção 4 reescrita como **Resultados** (4.1 uso de pendrive com Tabela 6 e Figuras 10 a 12; 4.2 dados quentes
+  com Tabela 7 e Figura 13, e a nota sobre a mudança de 1.345.345 para 625.777 escritas desde a segunda entrega).
+- Seção 5 **Considerações finais**: objetivos atendidos, resposta ao problema de pesquisa, limitações e trabalhos
+  futuros. Referências mantidas. 23 páginas.
+- Arquivos: `PI_IV_2026_Artigo_Final.docx` e `.pdf` na pasta `artigo` do projeto (os da segunda entrega foram
+  mantidos).
+
+**Apresentação**
+- 18 slides com notas do apresentador: problema e pergunta de pesquisa, objetivos, arquitetura, as 12 etapas,
+  wear leveling dinâmico e estático, como os modos foram comparados, resultado principal (8,9×), escritas até a
+  falha, mapa de desgaste, evolução, dados quentes, a correção do estático, a tela de resultados, o shell,
+  dificuldades, conclusões e perguntas.
+- As figuras dos slides são recortes da própria tela de resultados (`docs/resultados.html`).
+
+**Estado final**
+- `make test`: 202 verificações em 9 programas, todas passando.
+- `./simulador --comparar` reproduz todos os números do artigo e dos slides (semente fixa).

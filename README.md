@@ -64,6 +64,14 @@ bloco) e `evolucao_<modo>.csv` (média, desvio e máximo ao longo das escritas).
 experimentos usam arquivos próprios e não alteram o dispositivo do shell. Acrescente
 `--sem-abrir` para gravar a página sem abrir o navegador.
 
+## Resultado principal
+
+No uso de pendrive (fotos e músicas que nunca mudam ocupando 60% do disco), o wear leveling
+dinâmico + estático aguentou **7.822.722 escritas até o primeiro bloco falhar, 8,9 vezes mais
+que o mapeamento sem wear leveling**, aproveitando 96,7% da vida dos blocos com cerca de 1% de
+escritas extras. O dinâmico sozinho ganhou só 17% nessa carga. Detalhes em
+[docs/resultados.md](docs/resultados.md).
+
 ## Documentação
 
 - [Requisitos](docs/01-requisitos.md)
