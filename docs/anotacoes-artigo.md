@@ -456,3 +456,60 @@ Interpretação para o texto:
 
 **Figura sugerida**
 - Tela do shell: `formatar estatico`, `escrever`, `ler`, `carga 500`, `estatisticas` e `desgaste`.
+
+## Etapa 9: Coleta de métricas (concluída)
+
+**O que foi feito**
+- `Metrics.hpp`: métricas calculadas a partir dos contadores P/E da camada física.
+  - Resumo do desgaste: média, desvio padrão, coeficiente de variação (CV = desvio / média), mínimo, máximo,
+    mediana, percentis 10 e 90, blocos nunca apagados, bad blocks e vida usada (média / 1000).
+  - `WearTimeline`: evolução do desgaste ao longo das escritas. Começa com uma amostra a cada 50 escritas;
+    quando passa de 400 amostras, descarta uma sim, outra não, e dobra o intervalo. Assim a curva tem sempre
+    entre 200 e 400 pontos, tanto no modo direto (milhares de escritas) quanto no estático (milhões).
+  - Exportação em CSV: desgaste por bloco (uma coluna por modo) e evolução.
+- `Experiment.hpp`: um experimento formata um dispositivo próprio, aplica uma carga num modo da FTL até o
+  primeiro bloco falhar e devolve todas as métricas. As duas cargas (dados quentes e sistema de arquivos)
+  agora passam pelo mesmo código.
+- `./simulador --cenario-quente` e `./simulador --cenario-fs` mostram a tabela comparativa e exportam
+  `<cenario>_resumo.csv`, `<cenario>_desgaste_por_bloco.csv` e `<cenario>_evolucao_<modo>.csv`.
+- No shell, `estatisticas` passou a mostrar o resumo completo do desgaste e o novo comando `exportar <arquivo.csv>`
+  grava os ciclos P/E dos 128 blocos.
+- Novo teste `tests/test_metrics.cpp` (22 verificações) e 2 verificações novas no teste do shell.
+  `make test` passou a ter 179 verificações, todas passando.
+
+**Por que essas métricas**
+- O desvio padrão sozinho engana: um desvio de 87 é enorme se a média é 9, e pequeno se a média é 984.
+  O **CV** compara modos com médias diferentes.
+- A **vida usada** mostra quanto da capacidade total de apagamentos foi aproveitada até a primeira falha.
+  Sem wear leveling, o pendrive "morre" com quase todos os blocos novos.
+- A **amplificação de escrita (WA)** mede o custo: páginas gravadas na NAND por escrita lógica.
+
+**Resultados com as métricas completas (escritas lógicas da fase de carga até a primeira falha)**
+
+Cenário de dados quentes:
+
+| Modo | Escritas | Média P/E | Desvio | CV | Mín | Vida usada | WA |
+|---|---|---|---|---|---|---|---|
+| Direto | 1.132 | 8,8 | 88,0 | 9,95 | 0 | 0,9% | 63,94 |
+| Mapeamento sem WL | 625.777 | 236,0 | 142,7 | 0,60 | 0 | 23,6% | 3,09 |
+| WL dinâmico | 2.601.162 | 984,3 | 87,4 | 0,09 | 0 | 98,4% | 3,10 |
+| WL dinâmico + estático | 2.620.210 | 991,7 | 2,7 | 0,003 | 976 | 99,2% | 3,10 |
+
+Cenário do sistema de arquivos:
+
+| Modo | Escritas | Média P/E | Desvio | CV | Mín | Vida usada | WA |
+|---|---|---|---|---|---|---|---|
+| Direto | 2.013 | 15,9 | 122,5 | 7,71 | 0 | 1,6% | 59,18 |
+| Mapeamento sem WL | 874.122 | 106,3 | 265,5 | 2,50 | 0 | 10,6% | 1,00 |
+| WL dinâmico | 1.022.858 | 124,5 | 296,5 | 2,38 | 0 | 12,4% | 1,00 |
+| WL dinâmico + estático | 5.423.178 | 844,2 | 40,5 | 0,05 | 813 | 84,4% | 1,01 |
+
+- Os números do cenário quente batem com os da Etapa 7 (mesma semente), agora medidos pelo código comum.
+- No cenário do sistema de arquivos, a WA fica perto de 1: as edições regravam o arquivo inteiro e o FS
+  libera os LBAs antigos, então o GC encontra blocos quase todos inválidos.
+- O estático custa pouco: 23.369 migrações em 5,4 milhões de escritas (WA de 1,00 para 1,01).
+
+**Decisões técnicas**
+1. Métricas calculadas só a partir dos contadores P/E da NAND, que a camada física já mantinha desde a Etapa 2.
+2. Amostragem com intervalo que dobra, para a curva de evolução ter tamanho parecido em todos os modos.
+3. Cada experimento usa arquivos próprios e os apaga no fim, para não estragar o pendrive do shell.

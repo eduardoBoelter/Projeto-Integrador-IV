@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "Metrics.hpp"
 #include "Workload.hpp"
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ private:
             << "  carga <n>              executa n operacoes de uso de pendrive (editar, criar, apagar)\n"
             << "  estatisticas           escritas, amplificacao, GC e resumo do desgaste\n"
             << "  desgaste               ciclos P/E de cada um dos 128 blocos\n"
+            << "  exportar <arquivo.csv> exporta os ciclos P/E dos blocos em CSV\n"
             << "  ajuda                  mostra esta lista\n"
             << "  sair                   salva e encerra" << std::endl;
     }
@@ -131,34 +133,29 @@ private:
     void cmd_stats(std::ostream& out) const {
         const IOStats& io = driver->stats();
         const FTLStats& fst = ftl->stats();
-        double mean = 0;
-        uint32_t max_pe = 0, min_pe = MAX_PE_CYCLES, bad = 0;
-        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
-            const NANDBlock& block = driver->block_info(b);
-            mean += block.pe_cycles;
-            max_pe = std::max(max_pe, block.pe_cycles);
-            min_pe = std::min(min_pe, block.pe_cycles);
-            if (block.is_bad_block) bad++;
-        }
-        mean /= TOTAL_BLOCKS;
-        double var = 0;
-        for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) {
-            double d = driver->block_info(b).pe_cycles - mean;
-            var += d * d;
-        }
+        WearSummary w = summarize(*driver);
         out << std::fixed << std::setprecision(2)
             << "Modo: " << ftl->name() << "\n"
             << "Nesta sessao: escritas logicas " << fst.host_writes << " | paginas programadas " << io.page_programs
             << " | apagamentos " << io.block_erases << " | amplificacao " << ftl->write_amplification() << "\n"
-            << "Desgaste acumulado: media " << mean << " | desvio padrao " << std::sqrt(var / TOTAL_BLOCKS)
-            << " | min " << min_pe << " | max " << max_pe << " de " << MAX_PE_CYCLES << " | bad blocks " << bad
-            << std::endl;
+            << "Desgaste acumulado: media " << w.mean << " | desvio padrao " << w.stdev << " | CV " << w.cv
+            << " | min " << w.min << " | max " << w.max << " de " << MAX_PE_CYCLES << " | bad blocks " << w.bad
+            << "\n"
+            << "Vida usada: " << 100 * w.life_used << "% da vida total dos blocos | blocos nunca apagados: "
+            << w.untouched << std::endl;
         if (auto* mapping = dynamic_cast<const PageMappingFTL*>(ftl.get()))
             out << "Garbage collection: " << mapping->gc().runs << " execucoes, " << mapping->gc().pages_copied
                 << " paginas copiadas" << std::endl;
         if (auto* wl = dynamic_cast<const WearLevelingFTL*>(ftl.get()); wl && wl->static_enabled())
             out << "Wear leveling estatico: " << wl->wl().static_migrations << " migracoes de dados frios" << std::endl;
         out << std::defaultfloat;
+    }
+
+    void cmd_export(const std::string& file, std::ostream& out) const {
+        if (export_wear_csv(file, {mode_key(mode)}, {pe_counts(*driver)}))
+            out << "[OK] Ciclos P/E dos 128 blocos exportados em " << file << std::endl;
+        else
+            out << "[ERRO] Nao foi possivel criar " << file << std::endl;
     }
 
     void cmd_wear(std::ostream& out) const {
@@ -274,6 +271,8 @@ public:
             cmd_stats(out);
         } else if (cmd == "desgaste") {
             cmd_wear(out);
+        } else if (cmd == "exportar" && in >> name) {
+            cmd_export(name, out);
         } else {
             out << "Comando desconhecido ou incompleto: '" << line << "'. Digite 'ajuda'." << std::endl;
             return true;

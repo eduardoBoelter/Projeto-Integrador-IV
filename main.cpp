@@ -12,15 +12,16 @@
 #include "IODriver.hpp"
 #include "FTL.hpp"
 #include "Shell.hpp"
+#include "Experiment.hpp"
 
 // Uso:
 //   ./simulador                    shell interativo sobre o pendrive simulado (Etapa 8):
 //                                  nand_device.bin, nand_meta.bin e nand_config.txt
 //   ./simulador < comandos.txt     o mesmo shell, lendo os comandos de um arquivo
 //   ./simulador --demo             demonstração da FTL com mapeamento (arquivos próprios)
-//   ./simulador --cenario-quente   roda o cenário de dados quentes até a 1ª falha nos quatro
-//                                  modos da FTL e compara os resultados
-//                                  (usa arquivos próprios, não mexe no dispositivo)
+//   ./simulador --cenario-quente   carga de dados quentes até a 1ª falha nos quatro modos
+//   ./simulador --cenario-fs       carga do sistema de arquivos até a 1ª falha nos quatro modos
+//                                  (os cenários usam arquivos próprios e exportam CSVs)
 
 // Abre o dispositivo existente ou formata um novo
 static bool open_or_format(NANDFlashMemory& flash, bool force_format) {
@@ -91,164 +92,26 @@ static int run_demo(bool force_format) {
     return 0;
 }
 
-// Resultado de um cenário, para a tabela comparativa
-struct ScenarioResult {
-    std::string mode;
-    uint64_t phase2_writes = 0;
-    uint64_t first_failure = 0;
-    double mean = 0, stdev = 0;
-    uint32_t max_pe = 0;
-    size_t untouched = 0;
-    double wa_phase2 = 0;
-    uint64_t gc_runs = 0;
-};
-
-// Cenário de dados quentes: simula um sistema de arquivos que atualiza o
-// tempo todo os mesmos metadados (LBAs 0 a 3: superbloco, tabela de
-// alocação e diretório) e, de vez em quando, um arquivo qualquer.
-// Roda até a primeira falha de bloco.
-static bool run_hot_scenario(const std::string& mode, ScenarioResult& out) {
-    NANDFlashMemory flash("cenario_device.bin", "cenario_meta.bin");
-    if (!flash.format()) {
-        std::cerr << "[ERRO] Falha ao formatar o dispositivo do cenario." << std::endl;
-        return false;
-    }
-    IODriver driver(flash);
-    std::unique_ptr<FTL> ftl;
-    PageMappingFTL* mapping = nullptr;
-    if (mode == "direto") {
-        ftl = std::make_unique<DirectFTL>(driver);
-    } else if (mode == "mapeamento") {
-        mapping = new PageMappingFTL(driver);
-        ftl.reset(mapping);
-    } else {
-        // "wl_dinamico" ou "wl_estatico" (Etapa 6)
-        mapping = new WearLevelingFTL(driver, mode == "wl_estatico");
-        ftl.reset(mapping);
-    }
-    std::cout << "\n=== Cenario de dados quentes: " << ftl->name() << " ===" << std::endl;
-
-    std::vector<uint8_t> data(PAGE_SIZE);
-    auto fill = [&](uint32_t lba, uint64_t version) {
-        for (size_t i = 0; i < PAGE_SIZE; ++i) data[i] = static_cast<uint8_t>(lba + version + i);
-    };
-
-    // Fase 1: grava o disco inteiro uma vez (como copiar os arquivos para o pendrive)
-    for (uint32_t lba = 0; lba < LOGICAL_PAGES; ++lba) {
-        fill(lba, 0);
-        if (ftl->write(lba, data.data()) != FTLResult::OK) {
-            std::cerr << "[ERRO] Falha no preenchimento inicial." << std::endl;
-            return false;
-        }
-    }
-    const uint64_t writes_phase1 = ftl->stats().host_writes;
-    const uint64_t programs_phase1 = driver.stats().page_programs;
-    std::cout << "Fase 1: " << LOGICAL_PAGES << " LBAs gravados (disco cheio)." << std::endl;
-
-    // Fase 2: 90% das escritas nos metadados (LBAs 0-3), 10% em dados aleatórios,
-    // até o primeiro bloco virar bad block
-    std::mt19937 rng(2026); // semente fixa: o resultado é sempre o mesmo
-    std::uniform_int_distribution<uint32_t> cold_lba(PAGES_PER_BLOCK, LOGICAL_PAGES - 1);
-    std::uniform_int_distribution<int> percent(0, 99);
-    uint64_t version = 1;
-    FTLResult result = FTLResult::OK;
-    while (result == FTLResult::OK && ftl->stats().first_failure_write == 0 && version < 50000000) {
-        uint32_t lba = (percent(rng) < 90) ? static_cast<uint32_t>(version % 4) : cold_lba(rng);
-        fill(lba, version++);
-        result = ftl->write(lba, data.data());
-    }
-    if (ftl->stats().first_failure_write == 0) {
-        std::cerr << "[ERRO] Cenario terminou sem falha de bloco (" << to_string(result) << ")" << std::endl;
-        return false;
-    }
-
-    // Métricas
-    const FTLStats& fs = ftl->stats();
-    std::vector<uint32_t> pe(TOTAL_BLOCKS);
-    for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) pe[b] = driver.block_info(b).pe_cycles;
-    double mean = 0;
-    for (uint32_t v : pe) mean += v;
-    mean /= TOTAL_BLOCKS;
-    double variance = 0;
-    for (uint32_t v : pe) variance += (v - mean) * (v - mean);
-
-    out.mode = mode;
-    out.phase2_writes = fs.first_failure_write - writes_phase1;
-    out.first_failure = fs.first_failure_write;
-    out.mean = mean;
-    out.stdev = std::sqrt(variance / TOTAL_BLOCKS);
-    out.max_pe = *std::max_element(pe.begin(), pe.end());
-    out.untouched = static_cast<size_t>(std::count(pe.begin(), pe.end(), 0u));
-    out.wa_phase2 = static_cast<double>(driver.stats().page_programs - programs_phase1) /
-                    static_cast<double>(fs.host_writes - writes_phase1);
-    out.gc_runs = mapping ? mapping->gc().runs : 0;
-
-    std::cout << "Fase 2: primeira falha na escrita logica n. " << fs.first_failure_write << " (bloco "
-              << fs.first_failed_block << "), " << out.phase2_writes << " escritas apos o preenchimento."
-              << std::endl
-              << std::fixed << std::setprecision(2)
-              << "Apagamentos por bloco: media " << out.mean << " | desvio padrao " << out.stdev
-              << " | maximo " << out.max_pe << " | blocos nunca apagados: " << out.untouched << std::endl
-              << "Amplificacao de escrita na fase 2: " << out.wa_phase2;
-    if (auto* wl = dynamic_cast<WearLevelingFTL*>(mapping); wl && wl->static_enabled()) {
-        std::cout << " | WL estatico: " << wl->wl().static_migrations << " migracoes";
-    }
-    if (mapping) {
-        std::cout << " | GC: " << mapping->gc().runs << " execucoes, " << mapping->gc().pages_copied
-                  << " paginas copiadas";
-    }
+// Etapa 9: roda uma carga nos quatro modos, mostra a tabela e exporta os CSVs
+static int run_scenario(WorkloadKind workload) {
+    std::cout << "=== Cenario: " << workload_title(workload) << " (ate a primeira falha de bloco) ===" << std::endl;
+    std::vector<ExperimentResult> results = run_all_modes(workload, std::cout);
     std::cout << std::endl;
-
-    std::vector<uint32_t> order(TOTAL_BLOCKS);
-    for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) order[b] = b;
-    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return pe[a] > pe[b]; });
-    std::cout << "Blocos mais desgastados:";
-    for (int i = 0; i < 5; ++i) std::cout << " " << order[i] << " (" << pe[order[i]] << ")";
-    std::cout << std::endl;
-
-    // CSV para gerar o gráfico de desgaste por bloco
-    const std::string csv_name = "desgaste_" + mode + ".csv";
-    std::ofstream csv(csv_name);
-    csv << "bloco,ciclos_pe\n";
-    for (uint32_t b = 0; b < TOTAL_BLOCKS; ++b) csv << b << "," << pe[b] << "\n";
-    std::cout << "[OK] Desgaste por bloco exportado em " << csv_name << std::endl;
-    return true;
-}
-
-static int run_comparison() {
-    std::vector<ScenarioResult> results;
-    for (const std::string mode : {"direto", "mapeamento", "wl_dinamico", "wl_estatico"}) {
-        ScenarioResult r;
-        if (!run_hot_scenario(mode, r)) return 1;
-        results.push_back(r);
-    }
-
-    std::cout << "\n=== Comparacao (ate a primeira falha de bloco) ===" << std::endl
-              << std::left << std::setw(14) << "Modo" << std::right << std::setw(14) << "Escritas f2"
-              << std::setw(12) << "Media P/E" << std::setw(12) << "Desvio" << std::setw(8) << "Max"
-              << std::setw(10) << "CV" << std::setw(12) << "Intocados" << std::setw(10) << "WA f2" << std::endl;
-    std::cout << std::fixed << std::setprecision(2);
-    // CV = coeficiente de variação (desvio / média): compara a uniformidade do desgaste
-    // entre modos com médias muito diferentes
-    for (const auto& r : results) {
-        std::cout << std::left << std::setw(14) << r.mode << std::right << std::setw(14) << r.phase2_writes
-                  << std::setw(12) << r.mean << std::setw(12) << r.stdev << std::setw(8) << r.max_pe
-                  << std::setw(10) << (r.mean > 0 ? r.stdev / r.mean : 0.0) << std::setw(12) << r.untouched << std::setw(10) << r.wa_phase2 << std::endl;
-    }
-    std::remove("cenario_device.bin");
-    std::remove("cenario_meta.bin");
+    print_comparison(results, std::cout);
+    export_results(results, std::string(workload_key(workload)) + "_", std::cout);
     return 0;
 }
 
 int main(int argc, char* argv[]) {
     const std::string option = argc > 1 ? argv[1] : "";
-    if (option == "--cenario-quente") return run_comparison();
+    if (option == "--cenario-quente") return run_scenario(WorkloadKind::HOT);
+    if (option == "--cenario-fs") return run_scenario(WorkloadKind::FILESYSTEM);
     if (option == "--demo") {
         std::cout << "=== Simulador de Memoria NAND Flash ===" << std::endl;
         return run_demo(true);
     }
     if (!option.empty()) {
-        std::cerr << "Opcao desconhecida: " << option << "\nUse: ./simulador [--demo | --cenario-quente]" << std::endl;
+        std::cerr << "Opcao desconhecida: " << option << "\nUse: ./simulador [--demo | --cenario-quente | --cenario-fs]" << std::endl;
         return 1;
     }
 

@@ -1,6 +1,7 @@
 // Teste do shell interativo (Etapa 8): executa roteiros de comandos e
 // confere a saída. Cada CHECK imprime [OK] ou [FALHOU].
 #include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -69,8 +70,16 @@ int main() {
     CHECK(has(out, "Ciclos P/E por bloco") && has(out, "112:"), "mapa de desgaste dos 128 blocos");
 
     std::cout << "Terceira sessao (wear leveling estatico)" << std::endl;
-    out = session("formatar estatico\ncarga 200\nestatisticas\nsair\n");
+    out = session("formatar estatico\ncarga 200\nestatisticas\nexportar test_shell_desgaste.csv\nsair\n");
     CHECK(has(out, "Wear leveling estatico:"), "estatisticas mostram as migracoes do estatico");
+    CHECK(has(out, "Vida usada:") && has(out, "| CV "), "estatisticas mostram o resumo do desgaste (Etapa 9)");
+    std::ifstream csv("test_shell_desgaste.csv");
+    std::string header;
+    std::getline(csv, header);
+    CHECK(has(out, "exportados em test_shell_desgaste.csv") && header == "bloco,estatico",
+          "exportar grava o desgaste em CSV");
+    csv.close();
+    std::remove("test_shell_desgaste.csv");
 
     std::remove(DATA);
     std::remove(META);

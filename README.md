@@ -27,17 +27,25 @@ dispositivo, cria um novo no modo com wear leveling estático. Comandos principa
 | `carga <n>` | executa n operações de uso de pendrive (editar, criar e apagar documentos) |
 | `estatisticas` | escritas, amplificação, GC, migrações e resumo do desgaste |
 | `desgaste` | ciclos P/E dos 128 blocos |
+| `exportar <arquivo.csv>` | grava os ciclos P/E dos 128 blocos em CSV |
 | `ajuda`, `sair` | lista os comandos / salva e encerra |
 
 Os comandos também podem vir de um arquivo: `./simulador < comandos.txt`.
 
 `./simulador --demo` mostra a FTL com mapeamento gravando o mesmo LBA em páginas diferentes.
 
-`./simulador --cenario-quente` roda o cenário de dados quentes (90% das escritas nos
-metadados) até a primeira falha de bloco em quatro modos da FTL (direto, mapeamento sem
-wear leveling, wear leveling dinâmico e dinâmico + estático), mostra a tabela comparativa e
-exporta o desgaste por bloco em `desgaste_<modo>.csv`. Usa arquivos próprios e não altera
-o dispositivo do shell.
+`./simulador --cenario-quente` e `./simulador --cenario-fs` rodam um experimento até a
+primeira falha de bloco nos quatro modos da FTL (direto, mapeamento sem wear leveling, wear
+leveling dinâmico e dinâmico + estático) e mostram a tabela comparativa:
+
+- `--cenario-quente`: disco cheio e 90% das escritas nos LBAs 0 a 3 (metadados);
+- `--cenario-fs`: uso de pendrive pelo sistema de arquivos (fotos e músicas que não mudam e
+  documentos editados o tempo todo).
+
+Os resultados são exportados em CSV com o prefixo do cenário (`quente_` ou `fs_`):
+`resumo.csv` (todas as métricas por modo), `desgaste_por_bloco.csv` (ciclos P/E de cada
+bloco) e `evolucao_<modo>.csv` (média, desvio e máximo ao longo das escritas). Os
+experimentos usam arquivos próprios e não alteram o dispositivo do shell.
 
 ## Documentação
 
