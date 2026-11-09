@@ -22,9 +22,10 @@ mapeamento de páginas: cada alteração de um LBA vai para uma página nova.
 `./simulador --format` força a formatação e zera o desgaste.
 
 `./simulador --cenario-quente` roda o cenário de dados quentes (90% das escritas nos
-metadados) até a primeira falha de bloco no mapeamento direto e no mapeamento de páginas,
-mostra a tabela comparativa e exporta o desgaste por bloco em `desgaste_direto.csv` e
-`desgaste_mapeamento.csv`. Usa arquivos próprios e não altera o dispositivo acima.
+metadados) até a primeira falha de bloco em quatro modos da FTL (direto, mapeamento sem
+wear leveling, wear leveling dinâmico e dinâmico + estático), mostra a tabela comparativa e
+exporta o desgaste por bloco em `desgaste_<modo>.csv`. Usa arquivos próprios e não altera
+o dispositivo acima.
 
 ## Documentação
 

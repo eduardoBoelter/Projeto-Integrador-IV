@@ -1,4 +1,4 @@
-# Anotações para o artigo: segunda entrega
+# Anotações para o artigo
 
 Este arquivo junta, etapa por etapa, o material para a **seção de Desenvolvimento** do artigo.
 Ele é atualizado ao fim de cada etapa e será usado para escrever o artigo depois da Etapa 5.
@@ -341,3 +341,54 @@ Etapas executadas: 0 a 5 (ambiente, requisitos e modelagem, camada física, driv
 
 Próximos passos (entrega final): wear leveling dinâmico e estático (Etapa 6), sistema de arquivos mínimo (7),
 shell interativo (8), métricas completas (9), bateria de testes comparativos com gráficos (10) e fechamento do artigo (11).
+
+---
+
+# Entrega final (Etapas 6 a 11)
+
+## Etapa 6: Wear leveling dinâmico e estático (concluída)
+
+**O que foi feito**
+- Nova classe `WearLevelingFTL` (em `FTL.hpp`), derivada da `PageMappingFTL`. Reaproveita a tabela LBA → PBA,
+  a escrita fora do lugar e o GC; muda só as políticas de desgaste.
+- **Dinâmico:** `select_free_block()` passa a escolher, entre os blocos livres, o de **menor contador P/E**.
+- **Estático:** a cada 64 escritas lógicas, compara o bloco livre mais gasto com o bloco de dados menos gasto.
+  Se a diferença passar de **50 ciclos**, os dados frios são copiados para o bloco livre mais gasto e o bloco
+  pouco gasto é apagado e volta à lista de livres, onde o dinâmico passa a usá-lo.
+- O cenário `./simulador --cenario-quente` agora roda quatro modos: `direto`, `mapeamento`, `wl_dinamico` e `wl_estatico`.
+- Novo teste `tests/test_wear_leveling.cpp` (17 verificações).
+
+**Resultados do cenário de dados quentes (até a primeira falha de bloco)**
+
+| Modo | Escritas na fase 2 | Média P/E | Desvio padrão | CV | Amplificação |
+|---|---|---|---|---|---|
+| Direto | 1.132 | 8,84 | 87,96 | 9,95 | 63,94 |
+| Mapeamento sem WL | 1.345.345 | 564,59 | 163,67 | 0,29 | 3,40 |
+| WL dinâmico | 1.736.001 | 737,01 | 74,73 | 0,10 | 3,44 |
+| WL dinâmico + estático | 2.069.377 | 923,25 | 19,86 | 0,02 | 3,61 |
+
+Interpretação para o texto:
+- O dinâmico sozinho aumentou a vida útil em 29% em relação ao mapeamento sem WL; com o estático, o ganho foi de 54%
+  (2.069.377 ÷ 1.345.345 = 1,54). Em relação ao mapeamento direto, são cerca de 1.828 vezes mais escritas.
+- Quando o primeiro bloco falhou no modo estático, a média já era de 923 ciclos: **92% da vida de todos os blocos foi
+  aproveitada**, contra 56% sem wear leveling.
+- O dinâmico sozinho não basta: com o disco cheio, quase não há blocos livres para escolher, e o GC sempre libera
+  os mesmos blocos (os de dados quentes). Os blocos com dados frios ficam parados. É exatamente o problema que o
+  estático resolve.
+- O custo do estático aparece na amplificação de escrita, que sobe pouco (3,44 → 3,61) por causa das cópias de dados frios.
+
+**Decisões técnicas**
+1. Wear leveling como **subclasse**: os modos comparados compartilham o mesmo código de mapeamento e GC, então a diferença
+   medida vem só da política de desgaste.
+2. Limite do estático de **50 ciclos** (5% da vida), como previsto na arquitetura; verificação a cada 64 escritas,
+   para não percorrer os 128 blocos em toda escrita.
+3. Os dados frios vão para o bloco livre **mais gasto**, que quase não será apagado de novo porque dados frios não mudam.
+
+**Dificuldades e soluções**
+- Na primeira versão, o estático só agia com mais de 2 blocos livres e **nunca migrou nada**: com o disco cheio,
+  o GC mantém de 1 a 2 blocos livres. *Solução:* a migração não consome espaço (ocupa 1 bloco livre e devolve o bloco
+  frio apagado), então basta haver 1 bloco livre.
+
+**Figuras sugeridas**
+- Gráfico de barras do desgaste por bloco nos quatro modos (`desgaste_<modo>.csv`).
+- Trecho de código: `check_static_wear_leveling()` e `select_free_block()` da `WearLevelingFTL`.

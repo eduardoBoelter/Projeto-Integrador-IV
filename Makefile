@@ -3,7 +3,7 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2
 
 TARGET  = simulador
 HEADERS = NANDFlash.hpp IODriver.hpp FTL.hpp
-TESTS   = tests/test_nand tests/test_driver tests/test_ftl_direct tests/test_ftl_mapping
+TESTS   = tests/test_nand tests/test_driver tests/test_ftl_direct tests/test_ftl_mapping tests/test_wear_leveling
 
 all: $(TARGET)
 
@@ -19,6 +19,7 @@ test: $(TESTS)
 	./tests/test_driver
 	./tests/test_ftl_direct
 	./tests/test_ftl_mapping
+	./tests/test_wear_leveling
 
 tests/test_nand: tests/test_nand.cpp NANDFlash.hpp
 	$(CXX) $(CXXFLAGS) tests/test_nand.cpp -o tests/test_nand
@@ -31,6 +32,9 @@ tests/test_ftl_direct: tests/test_ftl_direct.cpp $(HEADERS)
 
 tests/test_ftl_mapping: tests/test_ftl_mapping.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) tests/test_ftl_mapping.cpp -o tests/test_ftl_mapping
+
+tests/test_wear_leveling: tests/test_wear_leveling.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) tests/test_wear_leveling.cpp -o tests/test_wear_leveling
 
 clean:
 	rm -f $(TARGET) $(TARGET).exe $(TESTS) tests/*.exe *.o *.bin *.csv

@@ -15,8 +15,8 @@
 // Uso:
 //   ./simulador                    demonstração da FTL com mapeamento no dispositivo do usuário
 //   ./simulador --format           formata o dispositivo antes da demonstração
-//   ./simulador --cenario-quente   roda o cenário de dados quentes até a 1ª falha nos dois
-//                                  modos já implementados e compara os resultados
+//   ./simulador --cenario-quente   roda o cenário de dados quentes até a 1ª falha nos quatro
+//                                  modos da FTL e compara os resultados
 //                                  (usa arquivos próprios, não mexe no dispositivo)
 
 // Abre o dispositivo existente ou formata um novo
@@ -115,8 +115,12 @@ static bool run_hot_scenario(const std::string& mode, ScenarioResult& out) {
     PageMappingFTL* mapping = nullptr;
     if (mode == "direto") {
         ftl = std::make_unique<DirectFTL>(driver);
-    } else {
+    } else if (mode == "mapeamento") {
         mapping = new PageMappingFTL(driver);
+        ftl.reset(mapping);
+    } else {
+        // "wl_dinamico" ou "wl_estatico" (Etapa 6)
+        mapping = new WearLevelingFTL(driver, mode == "wl_estatico");
         ftl.reset(mapping);
     }
     std::cout << "\n=== Cenario de dados quentes: " << ftl->name() << " ===" << std::endl;
@@ -183,6 +187,9 @@ static bool run_hot_scenario(const std::string& mode, ScenarioResult& out) {
               << "Apagamentos por bloco: media " << out.mean << " | desvio padrao " << out.stdev
               << " | maximo " << out.max_pe << " | blocos nunca apagados: " << out.untouched << std::endl
               << "Amplificacao de escrita na fase 2: " << out.wa_phase2;
+    if (auto* wl = dynamic_cast<WearLevelingFTL*>(mapping); wl && wl->static_enabled()) {
+        std::cout << " | WL estatico: " << wl->wl().static_migrations << " migracoes";
+    }
     if (mapping) {
         std::cout << " | GC: " << mapping->gc().runs << " execucoes, " << mapping->gc().pages_copied
                   << " paginas copiadas";
@@ -207,21 +214,21 @@ static bool run_hot_scenario(const std::string& mode, ScenarioResult& out) {
 
 static int run_comparison() {
     std::vector<ScenarioResult> results;
-    for (const std::string mode : {"direto", "mapeamento"}) {
+    for (const std::string mode : {"direto", "mapeamento", "wl_dinamico", "wl_estatico"}) {
         ScenarioResult r;
         if (!run_hot_scenario(mode, r)) return 1;
         results.push_back(r);
     }
 
     std::cout << "\n=== Comparacao (ate a primeira falha de bloco) ===" << std::endl
-              << std::left << std::setw(12) << "Modo" << std::right << std::setw(14) << "Escritas f2"
+              << std::left << std::setw(14) << "Modo" << std::right << std::setw(14) << "Escritas f2"
               << std::setw(12) << "Media P/E" << std::setw(12) << "Desvio" << std::setw(8) << "Max"
               << std::setw(10) << "CV" << std::setw(12) << "Intocados" << std::setw(10) << "WA f2" << std::endl;
     std::cout << std::fixed << std::setprecision(2);
     // CV = coeficiente de variação (desvio / média): compara a uniformidade do desgaste
     // entre modos com médias muito diferentes
     for (const auto& r : results) {
-        std::cout << std::left << std::setw(12) << r.mode << std::right << std::setw(14) << r.phase2_writes
+        std::cout << std::left << std::setw(14) << r.mode << std::right << std::setw(14) << r.phase2_writes
                   << std::setw(12) << r.mean << std::setw(12) << r.stdev << std::setw(8) << r.max_pe
                   << std::setw(10) << (r.mean > 0 ? r.stdev / r.mean : 0.0) << std::setw(12) << r.untouched << std::setw(10) << r.wa_phase2 << std::endl;
     }
